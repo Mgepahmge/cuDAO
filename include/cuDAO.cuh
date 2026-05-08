@@ -18,6 +18,16 @@
 
 namespace cuDAO {
     // ──────────────────────────────────────────────────────────────────────────
+    // Constants
+    // ──────────────────────────────────────────────────────────────────────────
+    namespace constants {
+        inline constexpr size_t QUEUE_CAPACITY = 1024;
+        inline constexpr size_t MAX_PARAM_COUNT = 32;
+        inline constexpr size_t PARAM_BUFFER_SIZE = MAX_PARAM_COUNT * 8;
+    }
+
+
+    // ──────────────────────────────────────────────────────────────────────────
     // CUDA Promise & CUDA Future
     // ──────────────────────────────────────────────────────────────────────────
 
@@ -62,13 +72,13 @@ namespace cuDAO {
         dim3 block;
         size_t sharedMem{};
 
-        std::array<std::byte, 256> paramBuffer{};
-        std::array<size_t, 32> paramOffsets{};
-        std::array<size_t, 32> paramSizes{};
+        std::array<std::byte, constants::PARAM_BUFFER_SIZE> paramBuffer{};
+        std::array<size_t, constants::MAX_PARAM_COUNT> paramOffsets{};
+        std::array<size_t, constants::MAX_PARAM_COUNT> paramSizes{};
         size_t paramCount{};
 
-        std::array<void*, 32> writeArgs{};
-        std::array<void*, 32> readArgs{};
+        std::array<void*, constants::MAX_PARAM_COUNT> writeArgs{};
+        std::array<void*, constants::MAX_PARAM_COUNT> readArgs{};
         size_t writeArgsCount{};
         size_t readArgsCount{};
 
@@ -202,6 +212,7 @@ namespace cuDAO {
     // ──────────────────────────────────────────────────────────────────────────
     // Wait-Free MPSC Queue
     // ──────────────────────────────────────────────────────────────────────────
+
     template <typename T, size_t Capacity>
     class MPSCQueue {
         static_assert((Capacity & (Capacity - 1)) == 0, "Capacity must be a power of 2");
@@ -243,4 +254,32 @@ namespace cuDAO {
             return true;
         }
     };
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Global Task Queue
+    // ──────────────────────────────────────────────────────────────────────────
+
+    inline MPSCQueue<TaskDescriptor, constants::QUEUE_CAPACITY>& getTaskQueue() {
+        static MPSCQueue<TaskDescriptor, constants::QUEUE_CAPACITY> queue;
+        return queue;
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Kernel Launcher
+    // ──────────────────────────────────────────────────────────────────────────
+
+    template<typename Func, typename... Args>
+    void launchKernel(Func func, Args&&... args) {
+        auto task = buildTask(func, std::forward<Args>(args)...);
+        getTaskQueue().push(std::move(task));
+    }
+
+    template<typename Func, typename... Args>
+    CudaFuture launchKernelSync(Func func, Args&&... args) {
+        auto task = buildTask(func, std::forward<Args>(args)...);
+        auto promise = std::make_shared<CudaPromise>();
+        task.promise = promise;
+        getTaskQueue().push(std::move(task));
+        return CudaFuture{promise};
+    }
 }
