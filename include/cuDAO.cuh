@@ -198,4 +198,49 @@ namespace cuDAO {
         (processArg(desc, offset, std::forward<Args>(args)), ...);
         return desc;
     }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Wait-Free MPSC Queue
+    // ──────────────────────────────────────────────────────────────────────────
+    template <typename T, size_t Capacity>
+    class MPSCQueue {
+        static_assert((Capacity & (Capacity - 1)) == 0, "Capacity must be a power of 2");
+
+        struct Slot {
+            std::atomic<size_t> sequence;
+            T data;
+        };
+
+        alignas(64) std::array<Slot, Capacity> slots;
+        alignas(64) std::atomic<size_t> head;
+        alignas(64) std::atomic<size_t> tail;
+
+    public:
+        MPSCQueue() : head(0), tail(0) {
+            for (size_t i = 0; i < Capacity; ++i) {
+                slots[i].sequence.store(i, std::memory_order_relaxed);
+            }
+        }
+
+        bool push(T&& data) {
+            auto pos = tail.fetch_add(1, std::memory_order_relaxed);
+            auto& slot = slots[pos & (Capacity-1)];
+            while (slot.sequence.load(std::memory_order_acquire) != pos) {}
+            slot.data = std::move(data);
+            slot.sequence.store(pos + 1, std::memory_order_release);
+            return true;
+        }
+
+        bool pop(T& data) {
+            auto pos = head.load(std::memory_order_relaxed);
+            auto& slot = slots[pos & (Capacity-1)];
+            if (slot.sequence.load(std::memory_order_acquire) != pos + 1) {
+                return false;
+            }
+            data = std::move(slot.data);
+            slot.sequence.store(pos + Capacity, std::memory_order_release);
+            head.store(pos + 1, std::memory_order_relaxed);
+            return true;
+        }
+    };
 }
