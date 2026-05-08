@@ -1,6 +1,6 @@
 #include <cuda.h>
 #include <gtest/gtest.h>
-#include <cuDAO.h>
+#include <cuDAO.cuh>
 
 TEST(cuDAO, VersionDefined) {
     EXPECT_GT(CUDAO_VERSION, 0);

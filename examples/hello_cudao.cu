@@ -1,4 +1,4 @@
-#include <cuDAO.h>
+#include <cuDAO.cuh>
 #include <cuda.h>
 #include <cstdio>
 
