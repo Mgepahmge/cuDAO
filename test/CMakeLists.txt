@@ -20,3 +20,6 @@ function(cudao_add_test name)
 endfunction()
 
 cudao_add_test(test_sanity test_sanity.cu)
+cudao_add_test(test_task_descriptor test_task_descriptor.cu)
+cudao_add_test(test_future test_future.cu)
+cudao_add_test(test_mpsc_queue test_mpsc_queue.cu)
