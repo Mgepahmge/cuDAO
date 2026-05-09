@@ -1,5 +1,9 @@
 #pragma once
 
+#ifndef __CUDACC__
+#error "cuDAO.cuh must be compiled with nvcc. Include this file only in .cu files."
+#endif
+
 /**
  * @file cuDAO.cuh
  * @brief cuDAO — Dependency-Aware Ordering runtime for concurrent CUDA memory access
@@ -32,6 +36,38 @@ namespace cuDAO {
         static_assert((MAX_TRACKED_PTRS & (MAX_TRACKED_PTRS - 1)) == 0, "MAX_TRACKED_PTRS must be a power of 2");
         static_assert((STREAM_COUNT & (STREAM_COUNT - 1)) == 0, "STREAM_COUNT must be a power of 2");
     }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Platform-specific futex / WaitOnAddress wrapper
+    // ──────────────────────────────────────────────────────────────────────────
+
+#ifdef _WIN32
+#include <windows.h>
+
+    inline void platformWait(std::atomic<bool>& flag) {
+        bool expected = false;
+        WaitOnAddress(&flag, &expected, sizeof(bool), INFINITE);
+    }
+
+    inline void platformNotify(std::atomic<bool>& flag) {
+        flag.store(true, std::memory_order_release);
+        WakeByAddressAll(&flag);
+    }
+
+#else
+#include <linux/futex.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
+    inline void platformWait(std::atomic<int32_t>& flag) {
+        syscall(SYS_futex, &flag, FUTEX_WAIT_PRIVATE, 0, nullptr, nullptr, 0);
+    }
+
+    inline void platformNotify(std::atomic<int32_t>& flag) {
+        flag.store(1, std::memory_order_release);
+        syscall(SYS_futex, &flag, FUTEX_WAKE_PRIVATE, 1, nullptr, nullptr, 0);
+    }
+#endif
 
 
     // ──────────────────────────────────────────────────────────────────────────
