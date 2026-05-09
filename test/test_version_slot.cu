@@ -23,25 +23,60 @@ TEST(cuDAO, VersionSlotPoolAllocFreeAndExhaustion) {
     pool.freeSlots[1] = 20;
     pool.freeSlots[2] = 30;
 
-    cuDAO::VersionSlot a{};
-    cuDAO::VersionSlot b{};
-    cuDAO::VersionSlot c{};
-    cuDAO::VersionSlot d{};
+    auto* a = pool.alloc();
+    auto* b = pool.alloc();
+    auto* c = pool.alloc();
+    auto* d = pool.alloc();
 
-    ASSERT_TRUE(pool.alloc(a));
-    ASSERT_TRUE(pool.alloc(b));
-    ASSERT_TRUE(pool.alloc(c));
-    EXPECT_FALSE(pool.alloc(d));
+    ASSERT_NE(a, nullptr);
+    ASSERT_NE(b, nullptr);
+    ASSERT_NE(c, nullptr);
+    EXPECT_EQ(d, nullptr);
 
-    EXPECT_EQ(a.slotIndex, 30u);
-    EXPECT_EQ(b.slotIndex, 20u);
-    EXPECT_EQ(c.slotIndex, 10u);
-    EXPECT_EQ(a.expectedWriteVersion, 0u);
-    EXPECT_EQ(b.pendingReads, 0);
+    EXPECT_EQ(a->slotIndex, 30u);
+    EXPECT_EQ(b->slotIndex, 20u);
+    EXPECT_EQ(c->slotIndex, 10u);
+    EXPECT_EQ(a->expectedWriteVersion, 0u);
+    EXPECT_EQ(b->pendingReads, 0);
 
     pool.free(b);
-    ASSERT_TRUE(pool.alloc(d));
-    EXPECT_EQ(d.slotIndex, 20u);
+    d = pool.alloc();
+    ASSERT_NE(d, nullptr);
+    EXPECT_EQ(d->slotIndex, 20u);
+}
+
+TEST(cuDAO, RegisterPtrAndUnregisterPtrManageSlotMap) {
+    auto& map = cuDAO::getSlotMap();
+    map.clear();
+
+    cuDAO::VersionSlotPool pool{};
+    pool.freeTop = 2;
+    pool.freeSlots[0] = 4;
+    pool.freeSlots[1] = 9;
+
+    int a = 1;
+    int b = 2;
+
+    ASSERT_TRUE(cuDAO::registerPtr(&a, pool));
+    EXPECT_EQ(map.size(), 1u);
+    ASSERT_NE(map.find(&a), map.end());
+    EXPECT_EQ(map[&a]->slotIndex, 9u);
+
+    EXPECT_FALSE(cuDAO::registerPtr(&a, pool));
+    EXPECT_EQ(map.size(), 1u);
+
+    ASSERT_TRUE(cuDAO::registerPtr(&b, pool));
+    EXPECT_EQ(map.size(), 2u);
+    EXPECT_EQ(map[&b]->slotIndex, 4u);
+
+    cuDAO::unregisterPtr(&a, pool);
+    EXPECT_EQ(map.count(&a), 0u);
+    EXPECT_EQ(pool.freeTop, 1u);
+    EXPECT_EQ(pool.freeSlots[0], 9u);
+
+    cuDAO::unregisterPtr(&b, pool);
+    EXPECT_TRUE(map.empty());
+    EXPECT_EQ(pool.freeTop, 2u);
 }
 
 TEST(cuDAO, VersionSlotPoolInitAndDestroy) {
