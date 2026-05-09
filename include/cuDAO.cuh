@@ -15,6 +15,7 @@
 #include <array>
 #include <memory>
 #include <cstring>
+#include <unordered_map>
 
 namespace cuDAO {
     // ──────────────────────────────────────────────────────────────────────────
@@ -312,6 +313,8 @@ namespace cuDAO {
         std::array<uint32_t, constants::MAX_TRACKED_PTRS> freeSlots;
         uint32_t freeTop;
 
+        std::array<VersionSlot, constants::MAX_TRACKED_PTRS> versionSlots;
+
         CUresult init() {
             auto res = cuMemAlloc(&deviceMem, constants::MAX_TRACKED_PTRS * sizeof(uint64_t));
 
@@ -353,18 +356,57 @@ namespace cuDAO {
             }
         }
 
-        bool alloc(VersionSlot& slot) {
+        VersionSlot* alloc() noexcept {
             if (freeTop == 0) {
-                return false;
+                return nullptr;
             }
-            slot.slotIndex = freeSlots[--freeTop];
+            const auto idx = freeSlots[--freeTop];
+            auto& slot = versionSlots[idx];
+            slot.slotIndex = idx;
             slot.expectedWriteVersion = 0;
             slot.pendingReads = 0;
-            return true;
+            return &slot;
         }
 
-        void free(const VersionSlot& slot) {
-            freeSlots[freeTop++] = slot.slotIndex;
+        void free(const VersionSlot* slot) noexcept {
+            freeSlots[freeTop++] = slot->slotIndex;
         }
     };
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Slot Map
+    // ──────────────────────────────────────────────────────────────────────────
+
+    struct PtrHash {
+        size_t operator()(void* ptr) const noexcept {
+            return reinterpret_cast<size_t>(ptr) >> 8;
+        }
+    };
+
+    using SlotMapT = std::unordered_map<void*, VersionSlot*, PtrHash>;
+
+    inline SlotMapT& getSlotMap() {
+        static SlotMapT slotMap;
+        return slotMap;
+    }
+
+    inline bool registerPtr(void* ptr, VersionSlotPool& slotPool) {
+        auto* slot = slotPool.alloc();
+        if (!slot) {
+            return false;
+        }
+        if (!getSlotMap().try_emplace(ptr, slot).second) {
+            slotPool.free(slot);
+            return false;
+        }
+        return true;
+    }
+
+    inline void unregisterPtr(void* ptr, VersionSlotPool& slotPool) {
+        auto& map = getSlotMap();
+        if (const auto it = map.find(ptr); it != map.end()) {
+            slotPool.free(it->second);
+            map.erase(it);
+        }
+    }
 }
