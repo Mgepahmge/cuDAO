@@ -24,6 +24,10 @@ namespace cuDAO {
         inline constexpr size_t QUEUE_CAPACITY = 1024;
         inline constexpr size_t MAX_PARAM_COUNT = 32;
         inline constexpr size_t PARAM_BUFFER_SIZE = MAX_PARAM_COUNT * 8;
+        inline constexpr size_t MAX_TRACKED_PTRS = 1024;
+
+        static_assert((QUEUE_CAPACITY & (QUEUE_CAPACITY - 1)) == 0, "QUEUE_CAPACITY must be a power of 2");
+        static_assert((MAX_TRACKED_PTRS & (MAX_TRACKED_PTRS - 1)) == 0, "MAX_TRACKED_PTRS must be a power of 2");
     }
 
 
@@ -282,4 +286,85 @@ namespace cuDAO {
         getTaskQueue().push(std::move(task));
         return CudaFuture{promise};
     }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Version Slot
+    // ──────────────────────────────────────────────────────────────────────────
+
+    struct VersionSlot {
+        uint32_t slotIndex;
+        uint64_t expectedWriteVersion;
+        int32_t pendingReads;
+
+        [[nodiscard]] CUdeviceptr getWriteVersionAddr(CUdeviceptr base) const noexcept {
+            return base + slotIndex * sizeof(uint64_t);
+        }
+
+        [[nodiscard]] uint64_t* getReadGateAddr(uint64_t* base) const noexcept {
+            return base + slotIndex;
+        }
+    };
+
+    struct VersionSlotPool {
+        CUdeviceptr deviceMem;
+        uint64_t* pinnedMem;
+
+        std::array<uint32_t, constants::MAX_TRACKED_PTRS> freeSlots;
+        uint32_t freeTop;
+
+        CUresult init() {
+            auto res = cuMemAlloc(&deviceMem, constants::MAX_TRACKED_PTRS * sizeof(uint64_t));
+
+            if (res != CUDA_SUCCESS) {
+                return res;
+            }
+
+            res = cuMemsetD32(deviceMem, 0, constants::MAX_TRACKED_PTRS * 2);
+
+            if (res != CUDA_SUCCESS) {
+                cuMemFree(deviceMem);
+                return res;
+            }
+
+            res = cuMemAllocHost(reinterpret_cast<void**>(&pinnedMem), constants::MAX_TRACKED_PTRS * sizeof(uint64_t));
+            if (res != CUDA_SUCCESS) {
+                cuMemFree(deviceMem);
+                return res;
+            }
+
+            std::memset(pinnedMem, 0, constants::MAX_TRACKED_PTRS * sizeof(uint64_t));
+
+            freeTop = constants::MAX_TRACKED_PTRS;
+            for (uint32_t i = 0; i < constants::MAX_TRACKED_PTRS; ++i) {
+                freeSlots[i] = i;
+            }
+
+            return CUDA_SUCCESS;
+        }
+
+        void destroy() {
+            if (deviceMem) {
+                cuMemFree(deviceMem);
+                deviceMem = 0;
+            }
+            if (pinnedMem) {
+                cuMemFreeHost(pinnedMem);
+                pinnedMem = nullptr;
+            }
+        }
+
+        bool alloc(VersionSlot& slot) {
+            if (freeTop == 0) {
+                return false;
+            }
+            slot.slotIndex = freeSlots[--freeTop];
+            slot.expectedWriteVersion = 0;
+            slot.pendingReads = 0;
+            return true;
+        }
+
+        void free(const VersionSlot& slot) {
+            freeSlots[freeTop++] = slot.slotIndex;
+        }
+    };
 }
