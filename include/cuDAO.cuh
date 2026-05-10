@@ -632,7 +632,7 @@ namespace cuDAO {
             uint32_t streamId;
             auto& stream = streamPool.get(&streamId);
 #else
-            auto& stream = streamPool.get();
+            auto stream = streamPool.get();
 #endif
 
             for (size_t i = 0; i < task.writeArgsCount; ++i) {
@@ -661,7 +661,7 @@ namespace cuDAO {
                 auto writeArg = task.writeArgs[i];
                 auto slot = slotMap->at(writeArg);
 
-                cuStreamWaitValue64(stream, slot->getReadGateAddr(slotPool.pinnedMem), 0, CU_STREAM_WAIT_VALUE_EQ);
+                cuStreamWaitValue64(stream, reinterpret_cast<CUdeviceptr>(slot->getReadGateAddr(slotPool.pinnedMem)), 0, CU_STREAM_WAIT_VALUE_EQ);
             }
 
             auto* readData = new ReadCallbackData{
