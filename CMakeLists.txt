@@ -30,9 +30,10 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 # ── Options ─────────────────────────────────────────────────────────────────
-option(CUDAO_BUILD_TESTS    "Build tests"    ${PROJECT_IS_TOP_LEVEL})
-option(CUDAO_BUILD_EXAMPLES "Build examples" ${PROJECT_IS_TOP_LEVEL})
-option(CUDAO_ENABLE_ASAN    "Enable AddressSanitizer (Debug only)" OFF)
+option(CUDAO_BUILD_TESTS           "Build tests"                          ${PROJECT_IS_TOP_LEVEL})
+option(CUDAO_BUILD_EXAMPLES        "Build examples"                       ${PROJECT_IS_TOP_LEVEL})
+option(CUDAO_ENABLE_ASAN           "Enable AddressSanitizer (Debug only)" OFF)
+option(CUDAO_USE_LEAST_TASK_POLICY "Use least-task stream scheduler instead of round-robin" OFF)
 
 # ── CUDA ────────────────────────────────────────────────────────────────────
 find_package(CUDAToolkit REQUIRED)
@@ -57,6 +58,10 @@ target_link_libraries(cuDAO INTERFACE
 )
 
 target_compile_features(cuDAO INTERFACE cxx_std_17)
+
+if(CUDAO_USE_LEAST_TASK_POLICY)
+    target_compile_definitions(cuDAO INTERFACE CUDA_DAO_USE_LEAST_TASK_POLICY)
+endif()
 
 # ── Compiler warnings ───────────────────────────────────────────────────────
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
