@@ -651,6 +651,7 @@ namespace cuDAO {
         }
 
         void processTask(TaskDescriptor& task) {
+            if (task.taskType == TaskType::Kernel) {
 #ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
             uint32_t streamId;
             auto& stream = streamPool.get(&streamId);
@@ -723,6 +724,7 @@ namespace cuDAO {
             #endif
             };
             cuLaunchHostFunc(stream, completionCallBack, completionData);
+            }
         }
 
         void run() {
