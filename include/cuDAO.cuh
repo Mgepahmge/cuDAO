@@ -586,6 +586,23 @@ namespace cuDAO {
 #endif
         };
 
+        struct SyncCallbackData {
+            CudaPromise* promise;
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+            LeastTaskPolicy* policy;
+            uint32_t streamId;
+#endif
+        };
+
+        struct FreeCallbackData {
+            VersionSlotPool* slotPool;
+            void* ptr;
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+            LeastTaskPolicy* policy;
+            uint32_t streamId;
+#endif
+        };
+
         static void readStartCallback(void* data) {
             auto* data_ = reinterpret_cast<ReadCallbackData*>(data);
             auto& readArgs = data_->readArgs;
@@ -599,6 +616,31 @@ namespace cuDAO {
                 *slot->getReadGateAddr(slotPool_->pinnedMem) = 1;
             }
 
+            delete data_;
+        }
+
+        static void syncCallback(void* data) {
+            auto* data_ = reinterpret_cast<SyncCallbackData*>(data);
+            auto* promise = data_->promise;
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+            auto* policy = data_->policy;
+            auto streamId = data_->streamId;
+            policy->complete(streamId);
+#endif
+            promise->set();
+            delete data_;
+        }
+
+        static void freeCallback(void* data) {
+            auto* data_ = reinterpret_cast<FreeCallbackData*>(data);
+            auto* ptr = data_->ptr;
+            auto* slotPool = data_->slotPool;
+            unregisterPtr(ptr, *slotPool);
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+            auto* policy = data_->policy;
+            auto streamId = data_->streamId;
+            policy->complete(streamId);
+#endif
             delete data_;
         }
 
@@ -652,14 +694,13 @@ namespace cuDAO {
         }
 
         void processTask(TaskDescriptor& task) {
-            if (task.taskType == TaskType::Kernel) {
 #ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
-                uint32_t streamId;
-                auto& stream = streamPool.get(&streamId);
+            uint32_t streamId;
+            auto stream = streamPool.get(&streamId);
 #else
-                auto stream = streamPool.get();
+            auto stream = streamPool.get();
 #endif
-
+            if (task.taskType == TaskType::Kernel) {
                 for (size_t i = 0; i < task.writeArgsCount; ++i) {
                     auto writeArg = task.writeArgs[i];
                     if (slotMap->find(writeArg) == slotMap->end()) {
@@ -730,6 +771,58 @@ namespace cuDAO {
 #endif
                 };
                 cuLaunchHostFunc(stream, completionCallBack, completionData);
+            }
+            else {
+                auto ptr = task.writeArgs[0];
+                auto it = slotMap->find(ptr);
+
+                if (task.taskType == TaskType::Sync) {
+                    if (it == slotMap->end()) {
+                        registerPtr(ptr, slotPool);
+                        task.promise->set();
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+                        streamPool.policy.complete(streamId);
+#endif
+                        return;
+                    }
+                    auto slot = it->second;
+                    cuStreamWaitValue64(stream, slot->getWriteVersionAddr(slotPool.deviceMem),
+                                        slot->expectedWriteVersion, CU_STREAM_WAIT_VALUE_GEQ);
+                    auto* syncData = new SyncCallbackData{
+                        task.promise.get()
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+                        , &streamPool.policy, streamId
+#endif
+                    };
+                    cuLaunchHostFunc(stream, syncCallback, reinterpret_cast<void*>(syncData));
+                }
+                else if (task.taskType == TaskType::Free) {
+                    if (it == slotMap->end()) {
+                        cuMemFreeAsync(reinterpret_cast<CUdeviceptr>(ptr), stream);
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+                        streamPool.policy.complete(streamId);
+#endif
+                        return;
+                    }
+                    auto slot = it->second;
+                    cuStreamWaitValue64(stream, slot->getWriteVersionAddr(slotPool.deviceMem),
+                                        slot->expectedWriteVersion, CU_STREAM_WAIT_VALUE_GEQ);
+                    cuStreamWaitValue64(
+                        stream, reinterpret_cast<CUdeviceptr>(slot->getReadGateAddr(slotPool.pinnedMem)), 0,
+                        CU_STREAM_WAIT_VALUE_EQ);
+                    cuMemFreeAsync(reinterpret_cast<CUdeviceptr>(ptr), stream);
+                    auto* freeData = new FreeCallbackData{
+                        &slotPool,
+                        ptr
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+                        , &streamPool.policy, streamId
+#endif
+                    };
+                    cuLaunchHostFunc(stream, freeCallback, reinterpret_cast<void*>(freeData));
+                }
+                else {
+                    // Should never be reached
+                }
             }
         }
 
@@ -829,5 +922,24 @@ namespace cuDAO {
         while (!scheduler.idle.load(std::memory_order_acquire)) {
         }
         scheduler.streamPool.synchronizeAll();
+    }
+
+    template<typename T>
+    void sync(T* ptr) {
+        TaskDescriptor task;
+        task.taskType = TaskType::Sync;
+        auto promise = std::make_shared<CudaPromise>();
+        task.promise = promise;
+        task.writeArgs[0] = reinterpret_cast<void*>(ptr);
+        getDefaultScheduler().submitTask(std::move(task));
+        CudaFuture{promise}.wait();
+    }
+
+    template<typename T>
+    void cuDAOfree(T* ptr) {
+        TaskDescriptor task;
+        task.taskType = TaskType::Free;
+        task.writeArgs[0] = reinterpret_cast<void*>(ptr);
+        getDefaultScheduler().submitTask(std::move(task));
     }
 }
