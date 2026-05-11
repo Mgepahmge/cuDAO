@@ -75,6 +75,16 @@ namespace cuDAO {
     }
 #endif
 
+    // ──────────────────────────────────────────────────────────────────────────
+    // Enumeration
+    // ──────────────────────────────────────────────────────────────────────────
+
+    enum class TaskType {
+        Kernel,
+        Sync,
+        Free
+    };
+
 
     // ──────────────────────────────────────────────────────────────────────────
     // CUDA Promise & CUDA Future
@@ -116,6 +126,8 @@ namespace cuDAO {
     // ──────────────────────────────────────────────────────────────────────────
 
     struct TaskDescriptor {
+        TaskType taskType{TaskType::Kernel};
+
         void* func{};
         dim3 grid;
         dim3 block;
