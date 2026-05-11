@@ -257,7 +257,7 @@ namespace cuDAO {
         }
     }
 
-    template<typename Func, typename... Args>
+    template <typename Func, typename... Args>
     TaskDescriptor buildTask(Func func, const dim3 grid, const dim3 block, const size_t sharedMem, Args&&... args) {
         TaskDescriptor desc{};
         desc.func = reinterpret_cast<void*>(func);
@@ -296,8 +296,9 @@ namespace cuDAO {
 
         bool push(T&& data) {
             auto pos = tail.fetch_add(1, std::memory_order_relaxed);
-            auto& slot = slots[pos & (Capacity-1)];
-            while (slot.sequence.load(std::memory_order_acquire) != pos) {}
+            auto& slot = slots[pos & (Capacity - 1)];
+            while (slot.sequence.load(std::memory_order_acquire) != pos) {
+            }
             slot.data = std::move(data);
             slot.sequence.store(pos + 1, std::memory_order_release);
             return true;
@@ -305,7 +306,7 @@ namespace cuDAO {
 
         bool pop(T& data) {
             auto pos = head.load(std::memory_order_relaxed);
-            auto& slot = slots[pos & (Capacity-1)];
+            auto& slot = slots[pos & (Capacity - 1)];
             if (slot.sequence.load(std::memory_order_acquire) != pos + 1) {
                 return false;
             }
@@ -517,7 +518,7 @@ namespace cuDAO {
     // Scheduler
     // ──────────────────────────────────────────────────────────────────────────
 
-    template<typename Policy = RoundRobinPolicy>
+    template <typename Policy = RoundRobinPolicy>
     class Scheduler {
         using TaskQueueT = MPSCQueue<TaskDescriptor, constants::QUEUE_CAPACITY>;
 
@@ -653,77 +654,82 @@ namespace cuDAO {
         void processTask(TaskDescriptor& task) {
             if (task.taskType == TaskType::Kernel) {
 #ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
-            uint32_t streamId;
-            auto& stream = streamPool.get(&streamId);
+                uint32_t streamId;
+                auto& stream = streamPool.get(&streamId);
 #else
-            auto stream = streamPool.get();
+                auto stream = streamPool.get();
 #endif
 
-            for (size_t i = 0; i < task.writeArgsCount; ++i) {
-                auto writeArg = task.writeArgs[i];
-                if (slotMap->find(writeArg) == slotMap->end()) {
-                    registerPtr(writeArg, slotPool);
+                for (size_t i = 0; i < task.writeArgsCount; ++i) {
+                    auto writeArg = task.writeArgs[i];
+                    if (slotMap->find(writeArg) == slotMap->end()) {
+                        registerPtr(writeArg, slotPool);
+                    }
+                    auto slot = slotMap->at(writeArg);
+
+                    cuStreamWaitValue64(stream, slot->getWriteVersionAddr(slotPool.deviceMem),
+                                        slot->expectedWriteVersion, CU_STREAM_WAIT_VALUE_GEQ);
+
+                    ++slot->expectedWriteVersion;
                 }
-                auto slot = slotMap->at(writeArg);
 
-                cuStreamWaitValue64(stream, slot->getWriteVersionAddr(slotPool.deviceMem), slot->expectedWriteVersion, CU_STREAM_WAIT_VALUE_GEQ);
+                for (size_t i = 0; i < task.readArgsCount; ++i) {
+                    auto readArg = task.readArgs[i];
+                    if (slotMap->find(readArg) == slotMap->end()) {
+                        registerPtr(readArg, slotPool);
+                    }
+                    auto slot = slotMap->at(readArg);
 
-                ++slot->expectedWriteVersion;
-            }
-
-            for (size_t i = 0; i < task.readArgsCount; ++i) {
-                auto readArg = task.readArgs[i];
-                if (slotMap->find(readArg) == slotMap->end()) {
-                    registerPtr(readArg, slotPool);
+                    cuStreamWaitValue64(stream, slot->getWriteVersionAddr(slotPool.deviceMem),
+                                        slot->expectedWriteVersion, CU_STREAM_WAIT_VALUE_GEQ);
                 }
-                auto slot = slotMap->at(readArg);
 
-                cuStreamWaitValue64(stream, slot->getWriteVersionAddr(slotPool.deviceMem), slot->expectedWriteVersion, CU_STREAM_WAIT_VALUE_GEQ);
-            }
+                for (size_t i = 0; i < task.writeArgsCount; ++i) {
+                    auto writeArg = task.writeArgs[i];
+                    auto slot = slotMap->at(writeArg);
 
-            for (size_t i = 0; i < task.writeArgsCount; ++i) {
-                auto writeArg = task.writeArgs[i];
-                auto slot = slotMap->at(writeArg);
+                    cuStreamWaitValue64(
+                        stream, reinterpret_cast<CUdeviceptr>(slot->getReadGateAddr(slotPool.pinnedMem)), 0,
+                        CU_STREAM_WAIT_VALUE_EQ);
+                }
 
-                cuStreamWaitValue64(stream, reinterpret_cast<CUdeviceptr>(slot->getReadGateAddr(slotPool.pinnedMem)), 0, CU_STREAM_WAIT_VALUE_EQ);
-            }
+                auto* readData = new ReadCallbackData{
+                    task.readArgs,
+                    task.readArgsCount,
+                    &slotPool
+                };
 
-            auto* readData = new ReadCallbackData{
-                task.readArgs,
-                task.readArgsCount,
-                &slotPool
-            };
+                cuLaunchHostFunc(stream, readStartCallback, readData);
 
-            cuLaunchHostFunc(stream, readStartCallback, readData);
+                auto kernel = getCudaFunction(task.func);
+                void* kernelParams[constants::MAX_PARAM_COUNT];
+                for (size_t i = 0; i < task.paramCount; ++i) {
+                    kernelParams[i] = task.paramBuffer.data() + task.paramOffsets[i];
+                }
+                cuLaunchKernel(kernel,
+                               task.grid.x, task.grid.y, task.grid.z,
+                               task.block.x, task.block.y, task.block.z,
+                               task.sharedMem, stream,
+                               kernelParams, nullptr);
 
-            auto kernel = getCudaFunction(task.func);
-            void* kernelParams[constants::MAX_PARAM_COUNT];
-            for (size_t i = 0; i < task.paramCount; ++i) {
-                kernelParams[i] = task.paramBuffer.data() + task.paramOffsets[i];
-            }
-            cuLaunchKernel(kernel,
-                task.grid.x, task.grid.y, task.grid.z,
-                task.block.x, task.block.y, task.block.z,
-                task.sharedMem, stream,
-                kernelParams, nullptr);
+                for (size_t i = 0; i < task.writeArgsCount; ++i) {
+                    auto writeArg = task.writeArgs[i];
+                    auto slot = slotMap->at(writeArg);
 
-            for (size_t i = 0; i < task.writeArgsCount; ++i) {
-                auto writeArg = task.writeArgs[i];
-                auto slot = slotMap->at(writeArg);
+                    cuStreamWriteValue64(stream, slot->getWriteVersionAddr(slotPool.deviceMem),
+                                         slot->expectedWriteVersion, CU_STREAM_WRITE_VALUE_DEFAULT);
+                }
 
-                cuStreamWriteValue64(stream, slot->getWriteVersionAddr(slotPool.deviceMem), slot->expectedWriteVersion, CU_STREAM_WRITE_VALUE_DEFAULT);
-            }
-
-            auto* completionData = new CompletionCallbackData{
-                task.readArgs,
-                task.readArgsCount,
-                &slotPool,
-                task.promise.get()
-            #ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
-                , &streamPool.policy, streamId
-            #endif
-            };
-            cuLaunchHostFunc(stream, completionCallBack, completionData);
+                auto* completionData = new CompletionCallbackData{
+                    task.readArgs,
+                    task.readArgsCount,
+                    &slotPool,
+                    task.promise.get()
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+                    , &streamPool.policy, streamId
+#endif
+                };
+                cuLaunchHostFunc(stream, completionCallBack, completionData);
             }
         }
 
@@ -768,10 +774,10 @@ namespace cuDAO {
         }
 
     public:
-
         explicit Scheduler(const CUdevice device_) : device(device_) {
             thread = std::thread(&Scheduler::run, this);
-            while (!initialized.load(std::memory_order_acquire)) {}
+            while (!initialized.load(std::memory_order_acquire)) {
+            }
         }
 
         ~Scheduler() {
@@ -803,13 +809,13 @@ namespace cuDAO {
     // Kernel Launcher
     // ──────────────────────────────────────────────────────────────────────────
 
-    template<typename Func, typename... Args>
+    template <typename Func, typename... Args>
     void launchKernel(Func func, dim3 grid, dim3 block, size_t sharedMem, Args&&... args) {
         auto task = buildTask(func, grid, block, sharedMem, std::forward<Args>(args)...);
         getDefaultScheduler().submitTask(std::move(task));
     }
 
-    template<typename Func, typename... Args>
+    template <typename Func, typename... Args>
     CudaFuture launchKernelSync(Func func, dim3 grid, dim3 block, size_t sharedMem, Args&&... args) {
         auto task = buildTask(func, grid, block, sharedMem, std::forward<Args>(args)...);
         auto promise = std::make_shared<CudaPromise>();
