@@ -88,3 +88,65 @@ TEST(cuDAO, SchedulerLaunchKernelCompletesAndWrites) {
     cuMemFree(devicePtr);
     cuDevicePrimaryCtxRelease(device);
 }
+
+TEST(cuDAO, SchedulerSyncWaitsForPointerWrites) {
+    CUdevice device{};
+    CUcontext ctx{};
+    if (!initCudaOrSkip(device, ctx)) {
+        GTEST_SKIP();
+    }
+
+    CUdeviceptr devicePtr{};
+    ASSERT_EQ(cuMemAlloc(&devicePtr, sizeof(int)), CUDA_SUCCESS);
+    ASSERT_EQ(cuMemsetD32(devicePtr, 0, 1), CUDA_SUCCESS);
+
+    cuDAO::launchKernel(
+        writeValueKernel,
+        dim3{1, 1, 1},
+        dim3{1, 1, 1},
+        0,
+        cuDAO::write(reinterpret_cast<int*>(devicePtr)),
+        99
+    );
+
+    cuDAO::sync(reinterpret_cast<int*>(devicePtr));
+
+    int hostValue = 0;
+    ASSERT_EQ(cuMemcpyDtoH(&hostValue, devicePtr, sizeof(hostValue)), CUDA_SUCCESS);
+    EXPECT_EQ(hostValue, 99);
+
+    cuMemFree(devicePtr);
+    cuDevicePrimaryCtxRelease(device);
+}
+
+TEST(cuDAO, SchedulerCuDaoFreeReleasesDevicePointer) {
+    CUdevice device{};
+    CUcontext ctx{};
+    if (!initCudaOrSkip(device, ctx)) {
+        GTEST_SKIP();
+    }
+
+    CUdeviceptr devicePtr{};
+    ASSERT_EQ(cuMemAlloc(&devicePtr, sizeof(int)), CUDA_SUCCESS);
+    ASSERT_EQ(cuMemsetD32(devicePtr, 0, 1), CUDA_SUCCESS);
+
+    cuDAO::launchKernel(
+        writeValueKernel,
+        dim3{1, 1, 1},
+        dim3{1, 1, 1},
+        0,
+        cuDAO::write(reinterpret_cast<int*>(devicePtr)),
+        11
+    );
+
+    cuDAO::sync(reinterpret_cast<int*>(devicePtr));
+
+    int hostValue = 0;
+    ASSERT_EQ(cuMemcpyDtoH(&hostValue, devicePtr, sizeof(hostValue)), CUDA_SUCCESS);
+    EXPECT_EQ(hostValue, 11);
+
+    cuDAO::cuDAOfree(reinterpret_cast<int*>(devicePtr));
+    cuDAO::deviceSynchronize();
+
+    cuDevicePrimaryCtxRelease(device);
+}

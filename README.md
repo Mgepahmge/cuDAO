@@ -103,26 +103,26 @@ cuDAO::CudaFuture f = cuDAO::launchKernelSync(addKernel, grid, block, 0,
                                                write(c), read(a), read(b), n);
 f.wait();
 
-// free tracked memory (cuDAOfree — not yet implemented)
-// cuDAO::cuDAOfree(c);
+// free tracked memory (fire-and-forget)
+cuDAO::cuDAOfree(c);
 ```
 
 ---
 
 ## Current Status
 
-| Feature                       | Status                      |
-|-------------------------------|-----------------------------|
-| MPSC lock-free queue          | ✅ Complete                  |
-| Scheduler thread              | ✅ Complete                  |
-| Type-inference access mode    | ✅ Complete                  |
-| `read()` / `write()` wrappers | ✅ Complete                  |
-| Version-based dependency      | ✅ Complete                  |
-| `CudaFuture` / `CudaPromise`  | ✅ Complete                  |
-| `cuDAOfree`                   | 🚧 Not yet implemented       |
-| `sync(ptr)`                   | 🚧 Not yet implemented       |
-| Multi-device support          | 🚧 Not planned for v0.1     |
-| CUDA Graph backend            | 🚧 Not planned for v0.1     |
+| Feature                       | Status                  |
+|-------------------------------|-------------------------|
+| MPSC lock-free queue          | ✅ Complete              |
+| Scheduler thread              | ✅ Complete              |
+| Type-inference access mode    | ✅ Complete              |
+| `read()` / `write()` wrappers | ✅ Complete              |
+| Version-based dependency      | ✅ Complete              |
+| `CudaFuture` / `CudaPromise`  | ✅ Complete              |
+| `cuDAOfree`                   | ✅ Complete              |
+| `sync(ptr)`                   | ✅ Complete              |
+| Multi-device support          | 🚧 Not planned for v0.1 |
+| CUDA Graph backend            | 🚧 Not planned for v0.1 |
 
 ---
 
