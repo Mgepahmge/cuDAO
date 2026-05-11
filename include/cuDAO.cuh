@@ -20,6 +20,7 @@
 #include <memory>
 #include <cstring>
 #include <unordered_map>
+#include <thread>
 
 namespace cuDAO {
     // ──────────────────────────────────────────────────────────────────────────
@@ -492,6 +493,12 @@ namespace cuDAO {
             if (outIdx) *outIdx = idx;
             return streams[idx];
         }
+
+        void synchronizeAll() noexcept {
+            for (auto& stream : streams) {
+                cuStreamSynchronize(stream);
+            }
+        }
     };
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -501,6 +508,8 @@ namespace cuDAO {
     template<typename Policy = RoundRobinPolicy>
     class Scheduler {
         using TaskQueueT = MPSCQueue<TaskDescriptor, constants::QUEUE_CAPACITY>;
+
+        friend void deviceSynchronize();
 
         StreamPool<Policy> streamPool;
         VersionSlotPool slotPool{};
@@ -512,6 +521,8 @@ namespace cuDAO {
         CUdevice device;
         std::atomic<bool> initialized{false};
         std::unordered_map<void*, CUfunction> funcCache;
+
+        std::atomic<bool> idle{false};
 
         void initCudaContext() const {
             CUcontext ctx;
@@ -709,6 +720,7 @@ namespace cuDAO {
             initialized.store(true, std::memory_order_release);
 
             while (!stopped.load(std::memory_order_relaxed)) {
+                idle.store(false, std::memory_order_relaxed);
                 TaskDescriptor task;
 
                 while (taskQueue->pop(task)) {
@@ -723,14 +735,17 @@ namespace cuDAO {
                     }
                 }
                 if (found) {
+                    idle.store(true, std::memory_order_release);
                     continue;
                 }
 
                 if (taskQueue->pop(task)) {
                     processTask(task);
+                    idle.store(true, std::memory_order_release);
                     continue;
                 }
 
+                idle.store(true, std::memory_order_release);
                 platformWait(wakeFlag);
             }
 
@@ -787,5 +802,12 @@ namespace cuDAO {
         task.promise = promise;
         getDefaultScheduler().submitTask(std::move(task));
         return CudaFuture{promise};
+    }
+
+    inline void deviceSynchronize() {
+        auto& scheduler = getDefaultScheduler();
+        while (!scheduler.idle.load(std::memory_order_acquire)) {
+        }
+        scheduler.streamPool.synchronizeAll();
     }
 }

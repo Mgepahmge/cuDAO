@@ -79,7 +79,7 @@ TEST(cuDAO, SchedulerLaunchKernelCompletesAndWrites) {
         7
     );
 
-    ASSERT_EQ(cuCtxSynchronize(), CUDA_SUCCESS);
+    cuDAO::deviceSynchronize();
 
     int hostValue = 0;
     ASSERT_EQ(cuMemcpyDtoH(&hostValue, devicePtr, sizeof(hostValue)), CUDA_SUCCESS);
