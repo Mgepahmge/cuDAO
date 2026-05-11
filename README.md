@@ -1,4 +1,6 @@
-# cuDAO
+<p align="center">
+  <img src="assets/cuDAO_LOGO.png" alt="cuDAO" width="2000"/>
+</p>
 
 > ⚠️ **Early Development** — cuDAO is in early development. APIs are unstable, features are incomplete, and bugs are expected. Use at your own risk.
 
