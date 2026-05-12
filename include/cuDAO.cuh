@@ -428,18 +428,6 @@ namespace cuDAO {
         return slotMap;
     }
 
-    inline bool registerPtr(void* ptr, VersionSlotPool& slotPool) {
-        auto* slot = slotPool.alloc();
-        if (!slot) {
-            return false;
-        }
-        if (!getSlotMap().try_emplace(ptr, slot).second) {
-            slotPool.free(slot);
-            return false;
-        }
-        return true;
-    }
-
     inline void unregisterPtr(void* ptr, VersionSlotPool& slotPool) {
         auto& map = getSlotMap();
         if (const auto it = map.find(ptr); it != map.end()) {
@@ -703,10 +691,17 @@ namespace cuDAO {
             if (task.taskType == TaskType::Kernel) {
                 for (size_t i = 0; i < task.writeArgsCount; ++i) {
                     auto writeArg = task.writeArgs[i];
-                    if (slotMap->find(writeArg) == slotMap->end()) {
-                        registerPtr(writeArg, slotPool);
+                    auto [it, inserted] = slotMap->try_emplace(writeArg, nullptr);
+                    if (inserted) {
+                        auto* slot = slotPool.alloc();
+                        if (!slot) {
+                            // TODO Error Handling
+                            slotMap->erase(it);
+                            return;
+                        }
+                        it->second = slot;
                     }
-                    auto slot = slotMap->at(writeArg);
+                    auto slot = it->second;
 
                     cuStreamWaitValue64(stream, slot->getWriteVersionAddr(slotPool.deviceMem),
                                         slot->expectedWriteVersion, CU_STREAM_WAIT_VALUE_GEQ);
@@ -716,10 +711,17 @@ namespace cuDAO {
 
                 for (size_t i = 0; i < task.readArgsCount; ++i) {
                     auto readArg = task.readArgs[i];
-                    if (slotMap->find(readArg) == slotMap->end()) {
-                        registerPtr(readArg, slotPool);
+                    auto [it, inserted] = slotMap->try_emplace(readArg, nullptr);
+                    if (inserted) {
+                        auto* slot = slotPool.alloc();
+                        if (!slot) {
+                            // TODO Error Handling
+                            slotMap->erase(it);
+                            return;
+                        }
+                        it->second = slot;
                     }
-                    auto slot = slotMap->at(readArg);
+                    auto slot = it->second;
 
                     cuStreamWaitValue64(stream, slot->getWriteVersionAddr(slotPool.deviceMem),
                                         slot->expectedWriteVersion, CU_STREAM_WAIT_VALUE_GEQ);
@@ -778,7 +780,12 @@ namespace cuDAO {
 
                 if (task.taskType == TaskType::Sync) {
                     if (it == slotMap->end()) {
-                        registerPtr(ptr, slotPool);
+                        auto* slot = slotPool.alloc();
+                        if (!slot) {
+                            // TODO Error Handling
+                            return;
+                        }
+                        slotMap->emplace(ptr, slot);
                         task.promise->set();
 #ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
                         streamPool.policy.complete(streamId);

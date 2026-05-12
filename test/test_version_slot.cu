@@ -45,40 +45,6 @@ TEST(cuDAO, VersionSlotPoolAllocFreeAndExhaustion) {
     EXPECT_EQ(d->slotIndex, 20u);
 }
 
-TEST(cuDAO, RegisterPtrAndUnregisterPtrManageSlotMap) {
-    auto& map = cuDAO::getSlotMap();
-    map.clear();
-
-    cuDAO::VersionSlotPool pool{};
-    pool.freeTop = 2;
-    pool.freeSlots[0] = 4;
-    pool.freeSlots[1] = 9;
-
-    int a = 1;
-    int b = 2;
-
-    ASSERT_TRUE(cuDAO::registerPtr(&a, pool));
-    EXPECT_EQ(map.size(), 1u);
-    ASSERT_NE(map.find(&a), map.end());
-    EXPECT_EQ(map[&a]->slotIndex, 9u);
-
-    EXPECT_FALSE(cuDAO::registerPtr(&a, pool));
-    EXPECT_EQ(map.size(), 1u);
-
-    ASSERT_TRUE(cuDAO::registerPtr(&b, pool));
-    EXPECT_EQ(map.size(), 2u);
-    EXPECT_EQ(map[&b]->slotIndex, 4u);
-
-    cuDAO::unregisterPtr(&a, pool);
-    EXPECT_EQ(map.count(&a), 0u);
-    EXPECT_EQ(pool.freeTop, 1u);
-    EXPECT_EQ(pool.freeSlots[0], 9u);
-
-    cuDAO::unregisterPtr(&b, pool);
-    EXPECT_TRUE(map.empty());
-    EXPECT_EQ(pool.freeTop, 2u);
-}
-
 TEST(cuDAO, VersionSlotPoolInitAndDestroy) {
     ASSERT_EQ(cuInit(0), CUDA_SUCCESS);
 
