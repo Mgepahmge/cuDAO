@@ -522,6 +522,7 @@ namespace cuDAO {
         CUdevice device;
         std::atomic<bool> initialized{false};
         std::unordered_map<void*, CUfunction> funcCache;
+        std::array<VersionSlot*, constants::MAX_PARAM_COUNT> writeSlotsCache;
 
         std::atomic<bool> idle{false};
 
@@ -558,13 +559,13 @@ namespace cuDAO {
         }
 
         struct ReadCallbackData {
-            std::array<void*, constants::MAX_PARAM_COUNT> readArgs;
+            std::array<VersionSlot*, constants::MAX_PARAM_COUNT>* readSlots;
             size_t readArgsCount;
             VersionSlotPool* slotPool;
         };
 
         struct CompletionCallbackData {
-            std::array<void*, constants::MAX_PARAM_COUNT> readArgs;
+            std::array<VersionSlot*, constants::MAX_PARAM_COUNT> readSlots;
             size_t readArgsCount;
             VersionSlotPool* slotPool;
             CudaPromise* promise;
@@ -593,13 +594,11 @@ namespace cuDAO {
 
         static void readStartCallback(void* data) {
             auto* data_ = reinterpret_cast<ReadCallbackData*>(data);
-            auto& readArgs = data_->readArgs;
             auto* slotPool_ = data_->slotPool;
-            auto& slotMap_ = getSlotMap();
             auto readArgsCount = data_->readArgsCount;
 
             for (size_t i = 0; i < readArgsCount; ++i) {
-                auto slot = slotMap_.at(readArgs[i]);
+                auto slot = data_->readSlots->at(i);
                 ++slot->pendingReads;
                 *slot->getReadGateAddr(slotPool_->pinnedMem) = 1;
             }
@@ -633,52 +632,27 @@ namespace cuDAO {
         }
 
         static void completionCallBack(void* data) {
+            auto* data_ = reinterpret_cast<CompletionCallbackData*>(data);
+            auto* slotPool_ = data_->slotPool;
+            auto* promise = data_->promise;
+            auto readArgsCount = data_->readArgsCount;
+
+            for (size_t i = 0; i < readArgsCount; ++i) {
+                auto slot = data_->readSlots[i];
+                if (--slot->pendingReads == 0) {
+                    *slot->getReadGateAddr(slotPool_->pinnedMem) = 0;
+                }
+            }
+
+            if (promise) {
+                promise->set();
+            }
+
 #ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
-            auto* data_ = reinterpret_cast<CompletionCallbackData*>(data);
-            auto& readArgs = data_->readArgs;
-            auto* slotPool_ = data_->slotPool;
-            auto* promise = data_->promise;
-            auto* policy = data_->policy;
-            auto streamId = data_->streamId;
-            auto& slotMap_ = getSlotMap();
-            auto readArgsCount = data_->readArgsCount;
-
-            for (size_t i = 0; i < readArgsCount; ++i) {
-                auto slot = slotMap_.at(readArgs[i]);
-                if (--slot->pendingReads == 0) {
-                    *slot->getReadGateAddr(slotPool_->pinnedMem) = 0;
-                }
-            }
-
-            if (promise) {
-                promise->set();
-            }
-
-            policy->complete(streamId);
-
-            delete data_;
-
-#else
-            auto* data_ = reinterpret_cast<CompletionCallbackData*>(data);
-            auto& readArgs = data_->readArgs;
-            auto* slotPool_ = data_->slotPool;
-            auto* promise = data_->promise;
-            auto& slotMap_ = getSlotMap();
-            auto readArgsCount = data_->readArgsCount;
-
-            for (size_t i = 0; i < readArgsCount; ++i) {
-                auto slot = slotMap_.at(readArgs[i]);
-                if (--slot->pendingReads == 0) {
-                    *slot->getReadGateAddr(slotPool_->pinnedMem) = 0;
-                }
-            }
-
-            if (promise) {
-                promise->set();
-            }
-
-            delete data_;
+            data_->policy->complete(data_->streamId);
 #endif
+
+            delete data_;
         }
 
         void processTask(TaskDescriptor& task) {
@@ -689,6 +663,16 @@ namespace cuDAO {
             auto stream = streamPool.get();
 #endif
             if (task.taskType == TaskType::Kernel) {
+                auto* completionData = new CompletionCallbackData;
+                completionData->readArgsCount = task.readArgsCount;
+                completionData->promise = task.promise.get();
+                completionData->slotPool = &slotPool;
+
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+                completionData->streamId = streamId;
+                completionData->policy = &streamPool.policy;
+#endif
+
                 for (size_t i = 0; i < task.writeArgsCount; ++i) {
                     auto writeArg = task.writeArgs[i];
                     auto [it, inserted] = slotMap->try_emplace(writeArg, nullptr);
@@ -702,6 +686,7 @@ namespace cuDAO {
                         it->second = slot;
                     }
                     auto slot = it->second;
+                    writeSlotsCache[i] = slot;
 
                     cuStreamWaitValue64(stream, slot->getWriteVersionAddr(slotPool.deviceMem),
                                         slot->expectedWriteVersion, CU_STREAM_WAIT_VALUE_GEQ);
@@ -722,14 +707,14 @@ namespace cuDAO {
                         it->second = slot;
                     }
                     auto slot = it->second;
+                    completionData->readSlots[i] = slot;
 
                     cuStreamWaitValue64(stream, slot->getWriteVersionAddr(slotPool.deviceMem),
                                         slot->expectedWriteVersion, CU_STREAM_WAIT_VALUE_GEQ);
                 }
 
                 for (size_t i = 0; i < task.writeArgsCount; ++i) {
-                    auto writeArg = task.writeArgs[i];
-                    auto slot = slotMap->at(writeArg);
+                    auto* slot = writeSlotsCache[i];
 
                     cuStreamWaitValue64(
                         stream, reinterpret_cast<CUdeviceptr>(slot->getReadGateAddr(slotPool.pinnedMem)), 0,
@@ -737,7 +722,7 @@ namespace cuDAO {
                 }
 
                 auto* readData = new ReadCallbackData{
-                    task.readArgs,
+                    &completionData->readSlots,
                     task.readArgsCount,
                     &slotPool
                 };
@@ -756,22 +741,12 @@ namespace cuDAO {
                                kernelParams, nullptr);
 
                 for (size_t i = 0; i < task.writeArgsCount; ++i) {
-                    auto writeArg = task.writeArgs[i];
-                    auto slot = slotMap->at(writeArg);
+                    auto* slot = writeSlotsCache[i];
 
                     cuStreamWriteValue64(stream, slot->getWriteVersionAddr(slotPool.deviceMem),
                                          slot->expectedWriteVersion, CU_STREAM_WRITE_VALUE_DEFAULT);
                 }
 
-                auto* completionData = new CompletionCallbackData{
-                    task.readArgs,
-                    task.readArgsCount,
-                    &slotPool,
-                    task.promise.get()
-#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
-                    , &streamPool.policy, streamId
-#endif
-                };
                 cuLaunchHostFunc(stream, completionCallBack, completionData);
             }
             else {
@@ -931,7 +906,7 @@ namespace cuDAO {
         scheduler.streamPool.synchronizeAll();
     }
 
-    template<typename T>
+    template <typename T>
     void sync(T* ptr) {
         TaskDescriptor task;
         task.taskType = TaskType::Sync;
@@ -942,7 +917,7 @@ namespace cuDAO {
         CudaFuture{promise}.wait();
     }
 
-    template<typename T>
+    template <typename T>
     void cuDAOfree(T* ptr) {
         TaskDescriptor task;
         task.taskType = TaskType::Free;
