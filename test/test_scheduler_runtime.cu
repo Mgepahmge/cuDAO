@@ -38,14 +38,14 @@ TEST(cuDAO, SchedulerLaunchKernelSyncCompletesAndWrites) {
     ASSERT_EQ(cuMemAlloc(&devicePtr, sizeof(int)), CUDA_SUCCESS);
     ASSERT_EQ(cuMemsetD32(devicePtr, 0, 1), CUDA_SUCCESS);
 
-    auto future = cuDAO::launchKernelSync(
+    auto future = std::get<cuDAO::CudaFuture>(cuDAO::launchKernelSync(
         writeValueKernel,
         dim3{1, 1, 1},
         dim3{1, 1, 1},
         0,
         cuDAO::write(reinterpret_cast<int*>(devicePtr)),
         42
-    );
+    ));
 
     EXPECT_FALSE(future.ready());
     future.wait();

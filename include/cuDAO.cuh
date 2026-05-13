@@ -1,4 +1,6 @@
 #pragma once
+#include <stdexcept>
+#include <variant>
 
 #ifndef __CUDACC__
 #error "cuDAO.cuh must be compiled with nvcc. Include this file only in .cu files."
@@ -65,11 +67,11 @@ namespace cuDAO {
 
     using WakeFlagT = std::atomic<int32_t>;
 
-    inline void platformWait(WakeFlagT& flag) {
+    inline void platformWait(WakeFlagT& flag) noexcept {
         syscall(SYS_futex, &flag, FUTEX_WAIT_PRIVATE, 0, nullptr, nullptr, 0);
     }
 
-    inline void platformNotify(WakeFlagT& flag) {
+    inline void platformNotify(WakeFlagT& flag) noexcept {
         flag.store(1, std::memory_order_release);
         syscall(SYS_futex, &flag, FUTEX_WAKE_PRIVATE, 1, nullptr, nullptr, 0);
     }
@@ -85,6 +87,49 @@ namespace cuDAO {
         Free
     };
 
+    enum class cuDAOError {
+        Success = 0,
+        SlotPoolExhausted,
+        InvalidPtr,
+        ParameterOverflow,
+        CudaDriverError
+    };
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // cuDAO Error
+    // ──────────────────────────────────────────────────────────────────────────
+
+    struct cuDAOStatus {
+        cuDAOError err;
+        CUresult cudaResult;
+        const char* where;
+    };
+
+    inline std::string cuDAOGetErrorString(const cuDAOStatus& status) noexcept {
+        switch (status.err) {
+        case cuDAOError::Success:
+            return "Success";
+        case cuDAOError::ParameterOverflow:
+            return "Parameter Overflow";
+        case cuDAOError::InvalidPtr:
+            return "Invalid Pointer";
+        case cuDAOError::SlotPoolExhausted:
+            return "Slot Pool Exhausted";
+        case cuDAOError::CudaDriverError:
+            {
+                std::string errString{};
+                auto* cString = errString.c_str();
+                auto re = cuGetErrorString(status.cudaResult, &cString);
+                if (re == CUDA_ERROR_INVALID_VALUE) {
+                    return "Invalid CUDA Driver Error";
+                }
+                return errString;
+            }
+        default:
+            return "Unknown Error";
+        }
+    }
+
 
     // ──────────────────────────────────────────────────────────────────────────
     // CUDA Promise & CUDA Future
@@ -95,7 +140,7 @@ namespace cuDAO {
         std::mutex mtx;
         std::condition_variable cv;
 
-        void set() {
+        void set() noexcept {
             ready.store(true, std::memory_order_release);
             cv.notify_one();
         }
@@ -108,7 +153,10 @@ namespace cuDAO {
         explicit CudaFuture(std::shared_ptr<CudaPromise> p) : promise_(std::move(p)) {
         }
 
-        void wait() const {
+        // Exception should never be thrown.
+        // If an exception is thrown, it indicates a significant system issue,
+        // And the program should terminate.
+        void wait() const noexcept {
             if (promise_->ready.load(std::memory_order_acquire)) return;
             std::unique_lock lock(promise_->mtx);
             promise_->cv.wait(lock, [this] {
@@ -116,7 +164,7 @@ namespace cuDAO {
             });
         }
 
-        [[nodiscard]] bool ready() const {
+        [[nodiscard]] bool ready() const noexcept {
             return promise_->ready.load(std::memory_order_acquire);
         }
     };
@@ -154,7 +202,7 @@ namespace cuDAO {
     struct ReadWrapper {
         T* ptr;
 
-        explicit ReadWrapper(T* p) : ptr(p) {
+        explicit ReadWrapper(T* p) noexcept : ptr(p) {
         }
     };
 
@@ -162,17 +210,17 @@ namespace cuDAO {
     struct WriteWrapper {
         T* ptr;
 
-        explicit WriteWrapper(T* p) : ptr(p) {
+        explicit WriteWrapper(T* p) noexcept : ptr(p) {
         }
     };
 
     template <typename T>
-    ReadWrapper<T> read(T* ptr) {
+    ReadWrapper<T> read(T* ptr) noexcept {
         return ReadWrapper<T>{ptr};
     }
 
     template <typename T>
-    WriteWrapper<T> write(T* ptr) {
+    WriteWrapper<T> write(T* ptr) noexcept {
         return WriteWrapper<T>{ptr};
     }
 
@@ -207,6 +255,9 @@ namespace cuDAO {
     template <typename T>
     void processArg(TaskDescriptor& desc, size_t& offset, T&& arg) {
         using Raw = std::decay_t<T>;
+        if (desc.paramCount >= constants::MAX_PARAM_COUNT) {
+            throw std::runtime_error("Too many parameters.");
+        }
         if constexpr (is_write_wrapper<Raw>::value) {
             auto* ptr = static_cast<void*>(arg.ptr);
             std::memcpy(desc.paramBuffer.data() + offset, &ptr, sizeof(void*));
@@ -288,13 +339,13 @@ namespace cuDAO {
         alignas(64) std::atomic<size_t> tail;
 
     public:
-        MPSCQueue() : head(0), tail(0) {
+        MPSCQueue() noexcept : head(0), tail(0) {
             for (size_t i = 0; i < Capacity; ++i) {
                 slots[i].sequence.store(i, std::memory_order_relaxed);
             }
         }
 
-        bool push(T&& data) {
+        bool push(T&& data) noexcept {
             auto pos = tail.fetch_add(1, std::memory_order_relaxed);
             auto& slot = slots[pos & (Capacity - 1)];
             while (slot.sequence.load(std::memory_order_acquire) != pos) {
@@ -304,7 +355,7 @@ namespace cuDAO {
             return true;
         }
 
-        bool pop(T& data) {
+        bool pop(T& data) noexcept {
             auto pos = head.load(std::memory_order_relaxed);
             auto& slot = slots[pos & (Capacity - 1)];
             if (slot.sequence.load(std::memory_order_acquire) != pos + 1) {
@@ -321,7 +372,7 @@ namespace cuDAO {
     // Global Task Queue
     // ──────────────────────────────────────────────────────────────────────────
 
-    inline MPSCQueue<TaskDescriptor, constants::QUEUE_CAPACITY>& getTaskQueue() {
+    inline MPSCQueue<TaskDescriptor, constants::QUEUE_CAPACITY>& getTaskQueue() noexcept {
         static MPSCQueue<TaskDescriptor, constants::QUEUE_CAPACITY> queue;
         return queue;
     }
@@ -353,7 +404,7 @@ namespace cuDAO {
 
         std::array<VersionSlot, constants::MAX_TRACKED_PTRS> versionSlots;
 
-        CUresult init() {
+        CUresult init() noexcept {
             auto res = cuMemAlloc(&deviceMem, constants::MAX_TRACKED_PTRS * sizeof(uint64_t));
 
             if (res != CUDA_SUCCESS) {
@@ -383,7 +434,7 @@ namespace cuDAO {
             return CUDA_SUCCESS;
         }
 
-        void destroy() {
+        void destroy() noexcept {
             if (deviceMem) {
                 cuMemFree(deviceMem);
                 deviceMem = 0;
@@ -510,7 +561,7 @@ namespace cuDAO {
     class Scheduler {
         using TaskQueueT = MPSCQueue<TaskDescriptor, constants::QUEUE_CAPACITY>;
 
-        friend void deviceSynchronize();
+        friend cuDAOStatus deviceSynchronize() noexcept;
 
         StreamPool<Policy> streamPool;
         VersionSlotPool slotPool{};
@@ -863,7 +914,7 @@ namespace cuDAO {
             }
         }
 
-        void submitTask(TaskDescriptor&& task) {
+        void submitTask(TaskDescriptor&& task) noexcept {
             taskQueue->push(std::move(task));
             platformNotify(wakeFlag);
         }
@@ -885,29 +936,56 @@ namespace cuDAO {
     // ──────────────────────────────────────────────────────────────────────────
 
     template <typename Func, typename... Args>
-    void launchKernel(Func func, dim3 grid, dim3 block, size_t sharedMem, Args&&... args) {
-        auto task = buildTask(func, grid, block, sharedMem, std::forward<Args>(args)...);
-        getDefaultScheduler().submitTask(std::move(task));
+    cuDAOStatus launchKernel(Func func, dim3 grid, dim3 block, size_t sharedMem, Args&&... args) noexcept {
+        try {
+            auto task = buildTask(func, grid, block, sharedMem, std::forward<Args>(args)...);
+            getDefaultScheduler().submitTask(std::move(task));
+            return cuDAOStatus{
+                cuDAOError::Success,
+                CUDA_SUCCESS,
+                __func__
+            };
+        }
+        catch (std::exception& e) {
+            return cuDAOStatus{
+                cuDAOError::ParameterOverflow,
+                CUDA_SUCCESS,
+                __func__
+            };
+        }
     }
 
     template <typename Func, typename... Args>
-    CudaFuture launchKernelSync(Func func, dim3 grid, dim3 block, size_t sharedMem, Args&&... args) {
-        auto task = buildTask(func, grid, block, sharedMem, std::forward<Args>(args)...);
-        auto promise = std::make_shared<CudaPromise>();
-        task.promise = promise;
-        getDefaultScheduler().submitTask(std::move(task));
-        return CudaFuture{promise};
+    std::variant<CudaFuture, cuDAOStatus> launchKernelSync(Func func, dim3 grid, dim3 block, size_t sharedMem, Args&&... args) noexcept {
+        try {
+            auto task = buildTask(func, grid, block, sharedMem, std::forward<Args>(args)...);
+            auto promise = std::make_shared<CudaPromise>();
+            task.promise = promise;
+            getDefaultScheduler().submitTask(std::move(task));
+            return CudaFuture{promise};
+        } catch (std::exception& e) {
+            return cuDAOStatus{
+                cuDAOError::ParameterOverflow,
+                CUDA_SUCCESS,
+                __func__
+            };
+        }
     }
 
-    inline void deviceSynchronize() {
+    inline cuDAOStatus deviceSynchronize() noexcept {
         auto& scheduler = getDefaultScheduler();
         while (!scheduler.idle.load(std::memory_order_acquire)) {
         }
         scheduler.streamPool.synchronizeAll();
+        return cuDAOStatus{
+            cuDAOError::Success,
+            CUDA_SUCCESS,
+            __func__
+        };
     }
 
     template <typename T>
-    void sync(T* ptr) {
+    cuDAOStatus sync(T* ptr) noexcept {
         TaskDescriptor task;
         task.taskType = TaskType::Sync;
         auto promise = std::make_shared<CudaPromise>();
@@ -915,13 +993,23 @@ namespace cuDAO {
         task.writeArgs[0] = reinterpret_cast<void*>(ptr);
         getDefaultScheduler().submitTask(std::move(task));
         CudaFuture{promise}.wait();
+        return cuDAOStatus{
+            cuDAOError::Success,
+            CUDA_SUCCESS,
+            __func__
+        };
     }
 
     template <typename T>
-    void cuDAOfree(T* ptr) {
+    cuDAOStatus cuDAOfree(T* ptr) noexcept {
         TaskDescriptor task;
         task.taskType = TaskType::Free;
         task.writeArgs[0] = reinterpret_cast<void*>(ptr);
         getDefaultScheduler().submitTask(std::move(task));
+        return cuDAOStatus{
+            cuDAOError::Success,
+            CUDA_SUCCESS,
+            __func__
+        };
     }
 }
