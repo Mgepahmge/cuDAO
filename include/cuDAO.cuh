@@ -92,7 +92,9 @@ namespace cuDAO {
         SlotPoolExhausted,
         InvalidPtr,
         ParameterOverflow,
-        CudaDriverError
+        CudaDriverError,
+        InternalError,
+        HostAllocationFailed
     };
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -105,7 +107,7 @@ namespace cuDAO {
         const char* where;
     };
 
-    inline std::string cuDAOGetErrorString(const cuDAOStatus& status) noexcept {
+    inline std::string cuDAOGetErrorString(const cuDAOStatus& status) {
         switch (status.err) {
         case cuDAOError::Success:
             return "Success";
@@ -117,19 +119,21 @@ namespace cuDAO {
             return "Slot Pool Exhausted";
         case cuDAOError::CudaDriverError:
             {
-                std::string errString{};
-                auto* cString = errString.c_str();
-                auto re = cuGetErrorString(status.cudaResult, &cString);
-                if (re == CUDA_ERROR_INVALID_VALUE) {
-                    return "Invalid CUDA Driver Error";
+                const char* msg = nullptr;
+                CUresult re = cuGetErrorString(status.cudaResult, &msg);
+                if (re != CUDA_SUCCESS || msg == nullptr) {
+                    return "Unknown CUDA Driver Error";
                 }
-                return errString;
+                return std::string{msg};
             }
+        case cuDAOError::InternalError:
+            return "Internal Error";
+        case cuDAOError::HostAllocationFailed:
+            return "Host Allocation Failed";
         default:
             return "Unknown Error";
         }
     }
-
 
     // ──────────────────────────────────────────────────────────────────────────
     // CUDA Promise & CUDA Future
@@ -946,9 +950,22 @@ namespace cuDAO {
                 __func__
             };
         }
-        catch (std::exception& e) {
+        catch (const std::runtime_error&) {
             return cuDAOStatus{
                 cuDAOError::ParameterOverflow,
+                CUDA_SUCCESS,
+                __func__
+            };
+        }
+        catch (const std::bad_alloc&) {
+            return cuDAOStatus{
+                cuDAOError::HostAllocationFailed,
+                CUDA_SUCCESS,
+                __func__
+            };
+        } catch (const std::exception&) {
+            return cuDAOStatus{
+                cuDAOError::InternalError,
                 CUDA_SUCCESS,
                 __func__
             };
@@ -956,16 +973,31 @@ namespace cuDAO {
     }
 
     template <typename Func, typename... Args>
-    std::variant<CudaFuture, cuDAOStatus> launchKernelSync(Func func, dim3 grid, dim3 block, size_t sharedMem, Args&&... args) noexcept {
+    std::variant<CudaFuture, cuDAOStatus> launchKernelSync(Func func, dim3 grid, dim3 block, size_t sharedMem,
+                                                           Args&&... args) noexcept {
         try {
             auto task = buildTask(func, grid, block, sharedMem, std::forward<Args>(args)...);
             auto promise = std::make_shared<CudaPromise>();
             task.promise = promise;
             getDefaultScheduler().submitTask(std::move(task));
             return CudaFuture{promise};
-        } catch (std::exception& e) {
+        }
+        catch (const std::runtime_error&) {
             return cuDAOStatus{
                 cuDAOError::ParameterOverflow,
+                CUDA_SUCCESS,
+                __func__
+            };
+        }
+        catch (const std::bad_alloc&) {
+            return cuDAOStatus{
+                cuDAOError::HostAllocationFailed,
+                CUDA_SUCCESS,
+                __func__
+            };
+        } catch (const std::exception&) {
+            return cuDAOStatus{
+                cuDAOError::InternalError,
                 CUDA_SUCCESS,
                 __func__
             };
@@ -993,11 +1025,20 @@ namespace cuDAO {
         task.writeArgs[0] = reinterpret_cast<void*>(ptr);
         getDefaultScheduler().submitTask(std::move(task));
         CudaFuture{promise}.wait();
-        return cuDAOStatus{
-            cuDAOError::Success,
-            CUDA_SUCCESS,
-            __func__
-        };
+        try {
+            return cuDAOStatus{
+                cuDAOError::Success,
+                CUDA_SUCCESS,
+                __func__
+            };
+        }
+        catch (const std::exception&) {
+            return cuDAOStatus{
+                cuDAOError::InternalError,
+                CUDA_SUCCESS,
+                __func__
+            };
+        }
     }
 
     template <typename T>
