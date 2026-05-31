@@ -1,6 +1,8 @@
 #pragma once
 #include <stdexcept>
+#include <string>
 #include <variant>
+#include <zmmintrin.h>
 
 #ifndef __CUDACC__
 #error "cuDAO.cuh must be compiled with nvcc. Include this file only in .cu files."
@@ -94,7 +96,8 @@ namespace cuDAO {
         ParameterOverflow,
         CudaDriverError,
         InternalError,
-        HostAllocationFailed
+        HostAllocationFailed,
+        SynchronizeFailed
     };
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -105,33 +108,35 @@ namespace cuDAO {
         cuDAOError err;
         CUresult cudaResult;
         const char* where;
+        const char* msg{nullptr};
     };
 
-    inline std::string cuDAOGetErrorString(const cuDAOStatus& status) {
+    inline void cuDAOStatusInitMsg(cuDAOStatus& status) {
         switch (status.err) {
-        case cuDAOError::Success:
-            return "Success";
-        case cuDAOError::ParameterOverflow:
-            return "Parameter Overflow";
-        case cuDAOError::InvalidPtr:
-            return "Invalid Pointer";
-        case cuDAOError::SlotPoolExhausted:
-            return "Slot Pool Exhausted";
-        case cuDAOError::CudaDriverError:
-            {
-                const char* msg = nullptr;
-                CUresult re = cuGetErrorString(status.cudaResult, &msg);
-                if (re != CUDA_SUCCESS || msg == nullptr) {
-                    return "Unknown CUDA Driver Error";
-                }
-                return std::string{msg};
-            }
-        case cuDAOError::InternalError:
-            return "Internal Error";
-        case cuDAOError::HostAllocationFailed:
-            return "Host Allocation Failed";
-        default:
-            return "Unknown Error";
+            case cuDAOError::Success:
+                break;
+            case cuDAOError::SlotPoolExhausted:
+                status.msg = "No more version slot available. Too many concurrent tracked pointers.";
+                break;
+            case cuDAOError::InvalidPtr:
+                status.msg = "Invalid pointer.";
+                break;
+            case cuDAOError::ParameterOverflow:
+                status.msg = "Too many parameters.";
+                break;
+            case cuDAOError::CudaDriverError:
+                status.msg = "CUDA driver error.";
+                break;
+            case cuDAOError::InternalError:
+                status.msg = "Internal error. This may be caused by insufficient memory or other factors";
+                break;
+            case cuDAOError::HostAllocationFailed:
+                status.msg = "Host allocation failed.";
+                break;
+            case cuDAOError::SynchronizeFailed:
+                break;
+            default:
+                status.msg = "Unknown error.";
         }
     }
 
@@ -524,7 +529,7 @@ namespace cuDAO {
 
     template <typename Policy = RoundRobinPolicy>
     struct StreamPool {
-        std::array<CUstream, constants::STREAM_COUNT> streams;
+        std::array<CUstream, constants::STREAM_COUNT> streams{};
         Policy policy;
 
         CUresult init() noexcept {
@@ -550,10 +555,39 @@ namespace cuDAO {
             return streams[idx];
         }
 
-        void synchronizeAll() noexcept {
-            for (auto& stream : streams) {
-                cuStreamSynchronize(stream);
+        cuDAOStatus synchronizeAll() noexcept {
+            std::unique_ptr<std::vector<std::pair<uint32_t, CUresult>>> status(nullptr);
+            for (uint32_t i = 0; i < constants::STREAM_COUNT; ++i) {
+                auto res = cuStreamSynchronize(streams[i]);
+                if (res != CUDA_SUCCESS) {
+                    if (!status) {
+                        status = std::make_unique<std::vector<std::pair<uint32_t, CUresult>>>();
+                    }
+                    status->emplace_back(i, res);
+                }
             }
+            if (!status) {
+                return cuDAOStatus{
+                    cuDAOError::Success,
+                    CUDA_SUCCESS
+                };
+            }
+            cuDAOStatus result{
+                cuDAOError::SynchronizeFailed,
+                CUDA_SUCCESS
+            };
+            std::string msgString{"Failed to synchronize the following streams:\n"};
+            for (auto i = status->begin(); i != status->end(); ++i) {
+                msgString += "Stream " + std::to_string(i->first) + " : ";
+                const char* cudaErrStr;
+                cuGetErrorString(i->second, &cudaErrStr);
+                msgString += cudaErrStr;
+                msgString += "\n";
+            }
+            auto* buf = new char[msgString.size() + 1];
+            std::strcpy(buf, msgString.c_str());
+            result.msg = buf;
+            return result;
         }
     };
 
@@ -943,6 +977,7 @@ namespace cuDAO {
     cuDAOStatus launchKernel(Func func, dim3 grid, dim3 block, size_t sharedMem, Args&&... args) noexcept {
         try {
             auto task = buildTask(func, grid, block, sharedMem, std::forward<Args>(args)...);
+            // TODO Error Handling
             getDefaultScheduler().submitTask(std::move(task));
             return cuDAOStatus{
                 cuDAOError::Success,
@@ -951,24 +986,30 @@ namespace cuDAO {
             };
         }
         catch (const std::runtime_error&) {
-            return cuDAOStatus{
+            cuDAOStatus status{
                 cuDAOError::ParameterOverflow,
                 CUDA_SUCCESS,
                 __func__
             };
+            cuDAOStatusInitMsg(status);
+            return status;
         }
         catch (const std::bad_alloc&) {
-            return cuDAOStatus{
+            cuDAOStatus status{
                 cuDAOError::HostAllocationFailed,
                 CUDA_SUCCESS,
                 __func__
             };
+            cuDAOStatusInitMsg(status);
+            return status;
         } catch (const std::exception&) {
-            return cuDAOStatus{
+            cuDAOStatus status{
                 cuDAOError::InternalError,
                 CUDA_SUCCESS,
                 __func__
             };
+            cuDAOStatusInitMsg(status);
+            return status;
         }
     }
 
@@ -979,53 +1020,59 @@ namespace cuDAO {
             auto task = buildTask(func, grid, block, sharedMem, std::forward<Args>(args)...);
             auto promise = std::make_shared<CudaPromise>();
             task.promise = promise;
+            // TODO Error Handling
             getDefaultScheduler().submitTask(std::move(task));
             return CudaFuture{promise};
         }
         catch (const std::runtime_error&) {
-            return cuDAOStatus{
+            cuDAOStatus status{
                 cuDAOError::ParameterOverflow,
                 CUDA_SUCCESS,
                 __func__
             };
+            cuDAOStatusInitMsg(status);
+            return status;
         }
         catch (const std::bad_alloc&) {
-            return cuDAOStatus{
+            cuDAOStatus status{
                 cuDAOError::HostAllocationFailed,
                 CUDA_SUCCESS,
                 __func__
             };
+            cuDAOStatusInitMsg(status);
+            return status;
         } catch (const std::exception&) {
-            return cuDAOStatus{
+            cuDAOStatus status{
                 cuDAOError::InternalError,
                 CUDA_SUCCESS,
                 __func__
             };
+            cuDAOStatusInitMsg(status);
+            return status;
         }
     }
 
     inline cuDAOStatus deviceSynchronize() noexcept {
+        // TODO Error Handling
         auto& scheduler = getDefaultScheduler();
         while (!scheduler.idle.load(std::memory_order_acquire)) {
         }
-        scheduler.streamPool.synchronizeAll();
-        return cuDAOStatus{
-            cuDAOError::Success,
-            CUDA_SUCCESS,
-            __func__
-        };
+        auto status = scheduler.streamPool.synchronizeAll();
+        status.where = __func__;
+        return status;
     }
 
     template <typename T>
     cuDAOStatus sync(T* ptr) noexcept {
+        try {
         TaskDescriptor task;
         task.taskType = TaskType::Sync;
         auto promise = std::make_shared<CudaPromise>();
         task.promise = promise;
         task.writeArgs[0] = reinterpret_cast<void*>(ptr);
+        // TODO Error Handling
         getDefaultScheduler().submitTask(std::move(task));
         CudaFuture{promise}.wait();
-        try {
             return cuDAOStatus{
                 cuDAOError::Success,
                 CUDA_SUCCESS,
@@ -1033,11 +1080,13 @@ namespace cuDAO {
             };
         }
         catch (const std::exception&) {
-            return cuDAOStatus{
+            cuDAOStatus status{
                 cuDAOError::InternalError,
                 CUDA_SUCCESS,
                 __func__
             };
+            cuDAOStatusInitMsg(status);
+            return status;
         }
     }
 
@@ -1046,6 +1095,7 @@ namespace cuDAO {
         TaskDescriptor task;
         task.taskType = TaskType::Free;
         task.writeArgs[0] = reinterpret_cast<void*>(ptr);
+        // TODO Error Handling
         getDefaultScheduler().submitTask(std::move(task));
         return cuDAOStatus{
             cuDAOError::Success,
