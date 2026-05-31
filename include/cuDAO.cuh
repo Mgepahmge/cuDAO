@@ -104,41 +104,98 @@ namespace cuDAO {
     // cuDAO Error
     // ──────────────────────────────────────────────────────────────────────────
 
+    class LazyString {
+        char* data{nullptr};
+        size_t size_{0};
+
+    public:
+        LazyString() noexcept = default;
+
+        explicit LazyString(const std::string& s) noexcept {
+            data = new(std::nothrow) char[s.size() + 1];
+            if (data) {
+                std::memcpy(data, s.c_str(), s.size() + 1);
+                size_ = s.size();
+            }
+        }
+
+        explicit LazyString(const char* s) noexcept {
+            if (!s) {
+                return;
+            }
+            size_ = std::strlen(s);
+            data = new(std::nothrow) char[size_ + 1];
+            if (data) {
+                std::memcpy(data, s, size_ + 1);
+            }
+        }
+
+        LazyString(const LazyString& s) = delete;
+
+        LazyString(LazyString&& s) noexcept : data(s.data), size_(s.size_) {
+            s.data = nullptr;
+            s.size_ = 0;
+        }
+
+        LazyString& operator=(const LazyString& other) = delete;
+
+        LazyString& operator=(LazyString&& other) noexcept {
+            if (this != &other) {
+                delete[] data;
+                data = other.data;
+                size_ = other.size_;
+                other.data = nullptr;
+                other.size_ = 0;
+            }
+            return *this;
+        }
+
+        [[nodiscard]] size_t size() const {
+            return size_;
+        }
+
+        [[nodiscard]] const char* c_str() const {
+            return data ? data : "";
+        }
+    };
+
     struct cuDAOStatus {
         cuDAOError err;
         CUresult cudaResult;
         const char* where;
-        const char* msg{nullptr};
-    };
+        LazyString msg;
 
-    inline void cuDAOStatusInitMsg(cuDAOStatus& status) {
-        switch (status.err) {
+        explicit cuDAOStatus(const cuDAOError err_, const char* where_ = nullptr,
+                             const CUresult cudaResult_ = CUDA_SUCCESS) noexcept : err(err_), cudaResult(cudaResult_),
+            where(where_) {
+            switch (err) {
             case cuDAOError::Success:
                 break;
             case cuDAOError::SlotPoolExhausted:
-                status.msg = "No more version slot available. Too many concurrent tracked pointers.";
+                msg = LazyString{"No more version slot available. Too many concurrent tracked pointers."};
                 break;
             case cuDAOError::InvalidPtr:
-                status.msg = "Invalid pointer.";
+                msg = LazyString{"Invalid pointer."};
                 break;
             case cuDAOError::ParameterOverflow:
-                status.msg = "Too many parameters.";
+                msg = LazyString{"Too many parameters."};
                 break;
             case cuDAOError::CudaDriverError:
-                status.msg = "CUDA driver error.";
+                msg = LazyString{"CUDA driver error."};
                 break;
             case cuDAOError::InternalError:
-                status.msg = "Internal error. This may be caused by insufficient memory or other factors";
+                msg = LazyString{"Internal error. This may be caused by insufficient memory or other factors"};
                 break;
             case cuDAOError::HostAllocationFailed:
-                status.msg = "Host allocation failed.";
+                msg = LazyString{"Host allocation failed."};
                 break;
             case cuDAOError::SynchronizeFailed:
                 break;
             default:
-                status.msg = "Unknown error.";
+                msg = LazyString{"Unknown error."};
+            }
         }
-    }
+    };
 
     // ──────────────────────────────────────────────────────────────────────────
     // CUDA Promise & CUDA Future
@@ -568,13 +625,11 @@ namespace cuDAO {
             }
             if (!status) {
                 return cuDAOStatus{
-                    cuDAOError::Success,
-                    CUDA_SUCCESS
+                    cuDAOError::Success
                 };
             }
             cuDAOStatus result{
-                cuDAOError::SynchronizeFailed,
-                CUDA_SUCCESS
+                cuDAOError::SynchronizeFailed
             };
             std::string msgString{"Failed to synchronize the following streams:\n"};
             for (auto i = status->begin(); i != status->end(); ++i) {
@@ -584,9 +639,7 @@ namespace cuDAO {
                 msgString += cudaErrStr;
                 msgString += "\n";
             }
-            auto* buf = new char[msgString.size() + 1];
-            std::strcpy(buf, msgString.c_str());
-            result.msg = buf;
+            result.msg = LazyString(msgString);
             return result;
         }
     };
@@ -981,34 +1034,28 @@ namespace cuDAO {
             getDefaultScheduler().submitTask(std::move(task));
             return cuDAOStatus{
                 cuDAOError::Success,
-                CUDA_SUCCESS,
                 __func__
             };
         }
         catch (const std::runtime_error&) {
             cuDAOStatus status{
                 cuDAOError::ParameterOverflow,
-                CUDA_SUCCESS,
                 __func__
             };
-            cuDAOStatusInitMsg(status);
             return status;
         }
         catch (const std::bad_alloc&) {
             cuDAOStatus status{
                 cuDAOError::HostAllocationFailed,
-                CUDA_SUCCESS,
                 __func__
             };
-            cuDAOStatusInitMsg(status);
             return status;
-        } catch (const std::exception&) {
+        }
+        catch (const std::exception&) {
             cuDAOStatus status{
                 cuDAOError::InternalError,
-                CUDA_SUCCESS,
                 __func__
             };
-            cuDAOStatusInitMsg(status);
             return status;
         }
     }
@@ -1027,27 +1074,22 @@ namespace cuDAO {
         catch (const std::runtime_error&) {
             cuDAOStatus status{
                 cuDAOError::ParameterOverflow,
-                CUDA_SUCCESS,
                 __func__
             };
-            cuDAOStatusInitMsg(status);
             return status;
         }
         catch (const std::bad_alloc&) {
             cuDAOStatus status{
                 cuDAOError::HostAllocationFailed,
-                CUDA_SUCCESS,
                 __func__
             };
-            cuDAOStatusInitMsg(status);
             return status;
-        } catch (const std::exception&) {
+        }
+        catch (const std::exception&) {
             cuDAOStatus status{
                 cuDAOError::InternalError,
-                CUDA_SUCCESS,
                 __func__
             };
-            cuDAOStatusInitMsg(status);
             return status;
         }
     }
@@ -1065,27 +1107,24 @@ namespace cuDAO {
     template <typename T>
     cuDAOStatus sync(T* ptr) noexcept {
         try {
-        TaskDescriptor task;
-        task.taskType = TaskType::Sync;
-        auto promise = std::make_shared<CudaPromise>();
-        task.promise = promise;
-        task.writeArgs[0] = reinterpret_cast<void*>(ptr);
-        // TODO Error Handling
-        getDefaultScheduler().submitTask(std::move(task));
-        CudaFuture{promise}.wait();
+            TaskDescriptor task;
+            task.taskType = TaskType::Sync;
+            auto promise = std::make_shared<CudaPromise>();
+            task.promise = promise;
+            task.writeArgs[0] = reinterpret_cast<void*>(ptr);
+            // TODO Error Handling
+            getDefaultScheduler().submitTask(std::move(task));
+            CudaFuture{promise}.wait();
             return cuDAOStatus{
                 cuDAOError::Success,
-                CUDA_SUCCESS,
                 __func__
             };
         }
         catch (const std::exception&) {
             cuDAOStatus status{
                 cuDAOError::InternalError,
-                CUDA_SUCCESS,
                 __func__
             };
-            cuDAOStatusInitMsg(status);
             return status;
         }
     }
@@ -1099,7 +1138,6 @@ namespace cuDAO {
         getDefaultScheduler().submitTask(std::move(task));
         return cuDAOStatus{
             cuDAOError::Success,
-            CUDA_SUCCESS,
             __func__
         };
     }
