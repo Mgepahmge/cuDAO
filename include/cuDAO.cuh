@@ -2,7 +2,7 @@
 #include <stdexcept>
 #include <string>
 #include <variant>
-#include <zmmintrin.h>
+#include <vector>
 
 #ifndef __CUDACC__
 #error "cuDAO.cuh must be compiled with nvcc. Include this file only in .cu files."
