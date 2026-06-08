@@ -24,13 +24,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ssh-key: ${{ secrets.CI_SSH_KEY }}
+          ssh-known-hosts: github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqyc2PzMR2I5B1wTE3w6FmYw36OhdMGF6DVL+M0tt
+          ssh-strict: true
+          persist-credentials: false
 
       - name: Show toolchain
         run: |
           nvidia-smi
           nvcc --version
           cmake --version
-          ninja --version
 
       - name: Configure
         run: |
