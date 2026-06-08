@@ -39,10 +39,10 @@ jobs:
       - name: Configure
         run: |
           cmake -S . -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCH} \
             -DCUDAO_BUILD_TESTS=ON \
-            -DCUDAO_BUILD_EXAMPLES=ON
+            -DCUDAO_BUILD_EXAMPLES=OFF
 
       - name: Build
         run: cmake --build build --parallel
