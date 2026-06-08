@@ -1,0 +1,47 @@
+name: cuDAO GPU CI
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: cudao-gpu-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gpu-test:
+    name: GPU test on self-hosted runner
+    runs-on: [self-hosted, linux, x64, cuda]
+
+    env:
+      CUDA_ARCH: 86
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          nvidia-smi
+          nvcc --version
+          cmake --version
+          ninja --version
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCH} \
+            -DCUDAO_BUILD_TESTS=ON \
+            -DCUDAO_BUILD_EXAMPLES=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure
