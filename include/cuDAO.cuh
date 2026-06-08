@@ -195,6 +195,23 @@ namespace cuDAO {
                 msg = LazyString{"Unknown error."};
             }
         }
+
+        cuDAOStatus(const cuDAOStatus& other) noexcept : cuDAOStatus(other.err, other.where, other.cudaResult) {
+        }
+
+        cuDAOStatus(cuDAOStatus&& other) noexcept
+            : err(other.err), cudaResult(other.cudaResult),
+              where(other.where), msg(std::move(other.msg)) {
+        }
+
+        cuDAOStatus& operator=(cuDAOStatus&& other) noexcept {
+            if (this == &other) return *this;
+            err = other.err;
+            cudaResult = other.cudaResult;
+            where = other.where;
+            msg = std::move(other.msg);
+            return *this;
+        }
     };
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -668,17 +685,36 @@ namespace cuDAO {
 
         std::atomic<bool> idle{false};
 
-        void initCudaContext() const {
+        cuDAOStatus initCudaContext() const noexcept {
             CUcontext ctx;
-            cuDevicePrimaryCtxRetain(&ctx, device);
-            cuCtxSetCurrent(ctx);
+            auto re = cuDevicePrimaryCtxRetain(&ctx, device);
+            if (re != CUDA_SUCCESS) {
+                return cuDAOStatus{cuDAOError::CudaDriverError, __func__, re};
+            }
+            re = cuCtxSetCurrent(ctx);
+            if (re != CUDA_SUCCESS) {
+                return cuDAOStatus{cuDAOError::CudaDriverError, __func__, re};
+            }
+            return cuDAOStatus{cuDAOError::Success};
         }
 
-        void initResource() {
-            streamPool.init();
-            slotPool.init();
-            slotMap = &getSlotMap();
-            taskQueue = &getTaskQueue();
+        cuDAOStatus initResource() noexcept {
+            auto re = streamPool.init();
+            if (re != CUDA_SUCCESS) {
+                return cuDAOStatus{cuDAOError::CudaDriverError, __func__, re};
+            }
+            re = slotPool.init();
+            if (re != CUDA_SUCCESS) {
+                return cuDAOStatus{cuDAOError::CudaDriverError, __func__, re};
+            }
+            try {
+                slotMap = &getSlotMap();
+                taskQueue = &getTaskQueue();
+            }
+            catch (const std::bad_alloc&) {
+                return cuDAOStatus{cuDAOError::HostAllocationFailed, __func__};
+            }
+            return cuDAOStatus{cuDAOError::Success};
         }
 
         void destroyCudaContext() const {
@@ -951,8 +987,18 @@ namespace cuDAO {
         }
 
         void run() {
-            initCudaContext();
-            initResource();
+            auto re = initCudaContext();
+            if (re.err != cuDAOError::Success) {
+                initStatus = cuDAOStatus{re};
+                initialized.store(true, std::memory_order_release);
+                return;
+            }
+            re = initResource();
+            if (re.err != cuDAOError::Success) {
+                initStatus = cuDAOStatus{re};
+                initialized.store(true, std::memory_order_release);
+                return;
+            }
 
             initialized.store(true, std::memory_order_release);
 
@@ -991,6 +1037,8 @@ namespace cuDAO {
         }
 
     public:
+        cuDAOStatus initStatus{cuDAOError::Success};
+
         explicit Scheduler(const CUdevice device_) : device(device_) {
             thread = std::thread(&Scheduler::run, this);
             while (!initialized.load(std::memory_order_acquire)) {
@@ -1023,15 +1071,22 @@ namespace cuDAO {
     }
 
     // ──────────────────────────────────────────────────────────────────────────
-    // Kernel Launcher
+    // Public API
     // ──────────────────────────────────────────────────────────────────────────
+    inline cuDAOStatus cuDAOInit() noexcept {
+        const auto& scheduler = getDefaultScheduler();
+        return cuDAOStatus{scheduler.initStatus};
+    }
 
     template <typename Func, typename... Args>
     cuDAOStatus launchKernel(Func func, dim3 grid, dim3 block, size_t sharedMem, Args&&... args) noexcept {
         try {
             auto task = buildTask(func, grid, block, sharedMem, std::forward<Args>(args)...);
-            // TODO Error Handling
-            getDefaultScheduler().submitTask(std::move(task));
+            auto& scheduler = getDefaultScheduler();
+            if (scheduler.initStatus.err != cuDAOError::Success) {
+                return cuDAOStatus{scheduler.initStatus};
+            }
+            scheduler.submitTask(std::move(task));
             return cuDAOStatus{
                 cuDAOError::Success,
                 __func__
@@ -1067,8 +1122,11 @@ namespace cuDAO {
             auto task = buildTask(func, grid, block, sharedMem, std::forward<Args>(args)...);
             auto promise = std::make_shared<CudaPromise>();
             task.promise = promise;
-            // TODO Error Handling
-            getDefaultScheduler().submitTask(std::move(task));
+            auto& scheduler = getDefaultScheduler();
+            if (scheduler.initStatus.err != cuDAOError::Success) {
+                return cuDAOStatus{scheduler.initStatus};
+            }
+            scheduler.submitTask(std::move(task));
             return CudaFuture{promise};
         }
         catch (const std::runtime_error&) {
@@ -1095,8 +1153,10 @@ namespace cuDAO {
     }
 
     inline cuDAOStatus deviceSynchronize() noexcept {
-        // TODO Error Handling
         auto& scheduler = getDefaultScheduler();
+        if (scheduler.initStatus.err != cuDAOError::Success) {
+            return cuDAOStatus{scheduler.initStatus};
+        }
         while (!scheduler.idle.load(std::memory_order_acquire)) {
         }
         auto status = scheduler.streamPool.synchronizeAll();
@@ -1112,8 +1172,11 @@ namespace cuDAO {
             auto promise = std::make_shared<CudaPromise>();
             task.promise = promise;
             task.writeArgs[0] = reinterpret_cast<void*>(ptr);
-            // TODO Error Handling
-            getDefaultScheduler().submitTask(std::move(task));
+            auto& scheduler = getDefaultScheduler();
+            if (scheduler.initStatus.err != cuDAOError::Success) {
+                return cuDAOStatus{scheduler.initStatus};
+            }
+            scheduler.submitTask(std::move(task));
             CudaFuture{promise}.wait();
             return cuDAOStatus{
                 cuDAOError::Success,
@@ -1134,8 +1197,11 @@ namespace cuDAO {
         TaskDescriptor task;
         task.taskType = TaskType::Free;
         task.writeArgs[0] = reinterpret_cast<void*>(ptr);
-        // TODO Error Handling
-        getDefaultScheduler().submitTask(std::move(task));
+        auto& scheduler = getDefaultScheduler();
+        if (scheduler.initStatus.err != cuDAOError::Success) {
+            return cuDAOStatus{scheduler.initStatus};
+        }
+        scheduler.submitTask(std::move(task));
         return cuDAOStatus{
             cuDAOError::Success,
             __func__
