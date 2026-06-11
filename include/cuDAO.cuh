@@ -1195,6 +1195,7 @@ std::abort(); \
                 break;
             default:
                 // Should never be reached
+                break;
             }
         }
 
