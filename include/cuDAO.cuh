@@ -510,6 +510,9 @@ std::abort(); \
 
         bool pop(T& item) noexcept {
             auto* oldHead = head.load(std::memory_order_acquire);
+            if (!oldHead) {
+                return false;
+            }
             while (true) {
                 auto* next = oldHead->next.load(std::memory_order_acquire);
                 if (!next) {
@@ -524,6 +527,9 @@ std::abort(); \
         }
 
         ~SPMCQueue() {
+            if (!head.load(std::memory_order_acquire)) {
+                return;
+            }
             T dummy;
             while (pop(dummy)) {}
             delete head.load(std::memory_order_acquire);
@@ -812,11 +818,11 @@ std::abort(); \
             return cuDAOStatus{cuDAOError::Success};
         }
 
-        void destroyCudaContext() const {
+        void destroyCudaContext() const noexcept {
             cuDevicePrimaryCtxRelease(device);
         }
 
-        void destroyResource() {
+        void destroyResource() noexcept {
             streamPool.destroy();
             slotPool.destroy();
         }
@@ -1365,6 +1371,7 @@ std::abort(); \
             auto promise = std::make_shared<CudaPromise>();
             task.promise = promise;
             task.writeArgs[0] = reinterpret_cast<void*>(ptr);
+            task.writeArgsCount = 1;
             auto& scheduler = getDefaultScheduler();
             if (scheduler.initStatus.err != cuDAOError::Success) {
                 return cuDAOStatus{scheduler.initStatus};
@@ -1390,6 +1397,7 @@ std::abort(); \
         TaskDescriptor task;
         task.taskType = TaskType::Free;
         task.writeArgs[0] = reinterpret_cast<void*>(ptr);
+        task.writeArgsCount = 1;
         auto& scheduler = getDefaultScheduler();
         if (scheduler.initStatus.err != cuDAOError::Success) {
             return cuDAOStatus{scheduler.initStatus};
