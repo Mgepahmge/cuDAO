@@ -99,7 +99,16 @@ std::abort(); \
     enum class TaskType {
         Kernel,
         Sync,
-        Free
+        Free,
+        MemcpyHtoD,
+        MemcpyDtoH,
+        MemcpyDtoD,
+        MemcpyUtoD,
+        MemcpyUtoH,
+        MemcpyUtoU,
+        MemcpyDtoU,
+        MemcpyHtoU,
+        Invalid
     };
 
     enum class cuDAOError {
@@ -113,6 +122,68 @@ std::abort(); \
         SynchronizeFailed,
         InvalidDeviceFunctionSymbol
     };
+
+    enum class cuDAOMemcpyType {
+        HostToDevice,
+        DeviceToHost,
+        DeviceToDevice,
+        Auto
+    };
+
+    enum class cuDAOMemKind : uint8_t {
+        Host = 0,
+        Device = 1,
+        Unified = 2
+    };
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Mapping Table
+    // ──────────────────────────────────────────────────────────────────────────
+
+    namespace mapping {
+        inline constexpr TaskType MemcpyTypeTable[3][3] = {
+            // dst/src      Host                   Device                Unified
+            /* Host*/ {TaskType::Invalid, TaskType::MemcpyDtoH, TaskType::MemcpyUtoH},
+            /* Device*/ {TaskType::MemcpyHtoD, TaskType::MemcpyDtoD, TaskType::MemcpyUtoD},
+            /* Unified*/ {TaskType::MemcpyHtoU, TaskType::MemcpyDtoU, TaskType::MemcpyUtoU}
+        };
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Utils
+    // ──────────────────────────────────────────────────────────────────────────
+
+    static inline bool toMemKind(CUmemorytype type, cuDAOMemKind& kind) noexcept {
+        switch (type) {
+        case CU_MEMORYTYPE_HOST:
+            kind = cuDAOMemKind::Host;
+            return true;
+        case CU_MEMORYTYPE_DEVICE:
+            kind = cuDAOMemKind::Device;
+            return true;
+        case CU_MEMORYTYPE_UNIFIED:
+            kind = cuDAOMemKind::Unified;
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    static inline bool getMemcpyTaskType(CUmemorytype dstType, CUmemorytype srcType, TaskType& taskType) noexcept {
+        cuDAOMemKind dstKind, srcKind;
+
+        if (!toMemKind(dstType, dstKind) || !toMemKind(srcType, srcKind)) {
+            taskType = TaskType::Invalid;
+            return false;
+        }
+
+        taskType = mapping::MemcpyTypeTable[
+            static_cast<uint8_t>(dstKind)
+        ][
+            static_cast<uint8_t>(srcKind)
+        ];
+        return taskType != TaskType::Invalid;
+    }
 
     // ──────────────────────────────────────────────────────────────────────────
     // cuDAO Error
@@ -1430,5 +1501,104 @@ std::abort(); \
             cuDAOError::Success,
             __func__
         };
+    }
+
+    template <typename T>
+    cuDAOStatus cuDAOMemcpy(T* dst, const T* src, const size_t count,
+                            const cuDAOMemcpyType memcpyType = cuDAOMemcpyType::Auto) noexcept {
+        TaskDescriptor task;
+        switch (memcpyType) {
+        case cuDAOMemcpyType::HostToDevice:
+            task.taskType = TaskType::MemcpyHtoD;
+            break;
+        case cuDAOMemcpyType::DeviceToHost:
+            task.taskType = TaskType::MemcpyDtoH;
+            break;
+        case cuDAOMemcpyType::DeviceToDevice:
+            task.taskType = TaskType::MemcpyDtoD;
+            break;
+        case cuDAOMemcpyType::Auto:
+            CUmemorytype dstType, srcType;
+            auto re = cuPointerGetAttribute(&dstType, CU_POINTER_ATTRIBUTE_MEMORY_TYPE,
+                                            reinterpret_cast<CUdeviceptr>(dst));
+            if (re != CUDA_SUCCESS) {
+                return cuDAOStatus{cuDAOError::CudaDriverError, __func__, re};
+            }
+            re = cuPointerGetAttribute(&srcType, CU_POINTER_ATTRIBUTE_MEMORY_TYPE, reinterpret_cast<CUdeviceptr>(src));
+            if (re != CUDA_SUCCESS) {
+                return cuDAOStatus{cuDAOError::CudaDriverError, __func__, re};
+            }
+            if (!getMemcpyTaskType(dstType, srcType, task.taskType)) {
+                return cuDAOStatus{cuDAOError::InvalidPtr, __func__};
+            }
+            break;
+        default:
+            // Should never be reached
+            break;
+        }
+        task.sharedMem = count;
+        task.writeArgsCount = 1;
+        task.writeArgs[0] = reinterpret_cast<void*>(dst);
+        task.readArgsCount = 1;
+        task.readArgs[0] = reinterpret_cast<void*>(src);
+        auto& scheduler = getDefaultScheduler();
+        if (scheduler.initStatus.err != cuDAOError::Success) {
+            return cuDAOStatus{scheduler.initStatus};
+        }
+        scheduler.submitTask(std::move(task));
+        return cuDAOStatus{cuDAOError::Success};
+    }
+
+    template <typename T>
+    std::variant<CudaFuture, cuDAOStatus> cuDAOMemcpySync(T* dst, const T* src, const size_t count,
+                                                          const cuDAOMemcpyType memcpyType = cuDAOMemcpyType::Auto)
+        noexcept {
+        TaskDescriptor task;
+        try {
+            task.promise = std::make_shared<CudaPromise>();
+        }
+        catch (const std::bad_alloc&) {
+            return cuDAOStatus{cuDAOError::InternalError, __func__};
+        }
+        switch (memcpyType) {
+        case cuDAOMemcpyType::HostToDevice:
+            task.taskType = TaskType::MemcpyHtoD;
+            break;
+        case cuDAOMemcpyType::DeviceToHost:
+            task.taskType = TaskType::MemcpyDtoH;
+            break;
+        case cuDAOMemcpyType::DeviceToDevice:
+            task.taskType = TaskType::MemcpyDtoD;
+            break;
+        case cuDAOMemcpyType::Auto:
+            CUmemorytype dstType, srcType;
+            auto re = cuPointerGetAttribute(&dstType, CU_POINTER_ATTRIBUTE_MEMORY_TYPE,
+                                            reinterpret_cast<CUdeviceptr>(dst));
+            if (re != CUDA_SUCCESS) {
+                return cuDAOStatus{cuDAOError::CudaDriverError, __func__, re};
+            }
+            re = cuPointerGetAttribute(&srcType, CU_POINTER_ATTRIBUTE_MEMORY_TYPE, reinterpret_cast<CUdeviceptr>(src));
+            if (re != CUDA_SUCCESS) {
+                return cuDAOStatus{cuDAOError::CudaDriverError, __func__, re};
+            }
+            if (!getMemcpyTaskType(dstType, srcType, task.taskType)) {
+                return cuDAOStatus{cuDAOError::InvalidPtr, __func__};
+            }
+            break;
+        default:
+            // Should never be reached
+            break;
+        }
+        task.sharedMem = count;
+        task.writeArgsCount = 1;
+        task.writeArgs[0] = reinterpret_cast<void*>(dst);
+        task.readArgsCount = 1;
+        task.readArgs[0] = reinterpret_cast<void*>(src);
+        auto& scheduler = getDefaultScheduler();
+        if (scheduler.initStatus.err != cuDAOError::Success) {
+            return cuDAOStatus{scheduler.initStatus};
+        }
+        scheduler.submitTask(std::move(task));
+        return CudaFuture{task.promise};
     }
 }
