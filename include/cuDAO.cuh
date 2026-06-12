@@ -2256,7 +2256,7 @@ std::abort(); \
             re = cuMemAllocHost(reinterpret_cast<void**>(ptr), bytes);
             break;
         case cuDAOMemKind::Unified:
-            re = cuMemAllocManaged(reinterpret_cast<CUdeviceptr*>(ptr), bytes, 0);
+            re = cuMemAllocManaged(reinterpret_cast<CUdeviceptr*>(ptr), bytes, CU_MEM_ATTACH_GLOBAL);
             break;
         default:
             re = CUDA_ERROR_INVALID_VALUE;
