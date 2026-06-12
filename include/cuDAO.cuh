@@ -2097,7 +2097,7 @@ std::abort(); \
         task.writeArgsCount = 1;
         task.writeArgs[0] = reinterpret_cast<void*>(dst);
         task.readArgsCount = 1;
-        task.readArgs[0] = reinterpret_cast<void*>(src);
+        task.readArgs[0] = reinterpret_cast<void*>(const_cast<T*>(src));
         auto& scheduler = getDefaultScheduler();
         if (scheduler.initStatus.err != cuDAOError::Success) {
             return cuDAOStatus{scheduler.initStatus};
@@ -2111,8 +2111,10 @@ std::abort(); \
                                                           const cuDAOMemcpyType memcpyType = cuDAOMemcpyType::Auto)
         noexcept {
         TaskDescriptor task;
+        std::shared_ptr<CudaPromise> promise;
         try {
-            task.promise = std::make_shared<CudaPromise>();
+            promise = std::make_shared<CudaPromise>();
+            task.promise = promise;
         }
         catch (const std::bad_alloc&) {
             return cuDAOStatus{cuDAOError::InternalError, __func__};
@@ -2159,12 +2161,12 @@ std::abort(); \
         task.writeArgsCount = 1;
         task.writeArgs[0] = reinterpret_cast<void*>(dst);
         task.readArgsCount = 1;
-        task.readArgs[0] = reinterpret_cast<void*>(src);
+        task.readArgs[0] = reinterpret_cast<void*>(const_cast<T*>(src));
         auto& scheduler = getDefaultScheduler();
         if (scheduler.initStatus.err != cuDAOError::Success) {
             return cuDAOStatus{scheduler.initStatus};
         }
         scheduler.submitTask(std::move(task));
-        return CudaFuture{task.promise};
+        return CudaFuture{promise};
     }
 }
