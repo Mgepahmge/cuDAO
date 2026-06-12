@@ -108,6 +108,7 @@ std::abort(); \
         MemcpyHtoU,
         Alloc,
         Register,
+        Unregister,
         Invalid
     };
 
@@ -952,6 +953,16 @@ std::abort(); \
 #endif
         };
 
+        struct UnregisterCallbackData {
+            VersionSlotPool* slotPool;
+            void* ptr;
+            CudaPromise* promise;
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+            LeastTaskPolicy* policy;
+            uint32_t streamId;
+#endif
+        };
+
         static void readStartCallback(void* data) noexcept {
             auto* data_ = reinterpret_cast<ReadCallbackData*>(data);
             auto* slotPool_ = data_->slotPool;
@@ -990,6 +1001,21 @@ std::abort(); \
             auto streamId = data_->streamId;
             policy->complete(streamId);
 #endif
+            delete data_;
+        }
+
+        static void unregisterCallback(void* data) noexcept {
+            auto* data_ = reinterpret_cast<UnregisterCallbackData*>(data);
+            auto* ptr = data_->ptr;
+            auto* slotPool = data_->slotPool;
+            auto* promise = data_->promise;
+            unregisterPtr(ptr, *slotPool);
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+            auto* policy = data_->policy;
+            auto streamId = data_->streamId;
+            policy->complete(streamId);
+#endif
+            promise->set();
             delete data_;
         }
 
@@ -1803,7 +1829,7 @@ std::abort(); \
         void processAllocTask(TaskDescriptor& task) noexcept {
             // Phase 1
 #ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
-            auto* syncData = new (std::nothrow) SyncCallbackData;
+            auto* syncData = new(std::nothrow) SyncCallbackData;
             if (!syncData) {
                 errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
                 return;
@@ -1847,7 +1873,54 @@ std::abort(); \
 
             ptrSlot->expectedWriteVersion = 1;
             CUDAO_ASSERT(cuStreamWriteValue64(stream, ptrSlot->getWriteVersionAddr(slotPool.deviceMem),
-                    ptrSlot->expectedWriteVersion, CU_STREAM_WRITE_VALUE_DEFAULT));
+                ptrSlot->expectedWriteVersion, CU_STREAM_WRITE_VALUE_DEFAULT));
+        }
+
+        void processUnregisterTask(TaskDescriptor& task) noexcept {
+            auto ptr = task.writeArgs[0];
+            auto it = slotMap->find(ptr);
+            if (it == slotMap->end()) {
+                task.promise->set();
+                return;
+            }
+
+            auto slot = it->second;
+
+            // Phase 1 : Reversible operations
+            // Allocate free callback data
+            auto* unregisterData = new (std::nothrow) UnregisterCallbackData{
+                &slotPool,
+                ptr,
+                task.promise.get()
+            };
+            if (!unregisterData) {
+                errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
+                return;
+            }
+
+            // Phase 2 : irreversible operations
+            // Get Stream
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+            uint32_t streamId;
+            auto stream = streamPool.get(&streamId);
+#else
+            auto stream = streamPool.get();
+#endif
+
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+            unregisterData->streamId = streamId;
+            unregisterData->policy = &streamPool.policy;
+#endif
+
+            // Wait write version & read gate
+            CUDAO_ASSERT(cuStreamWaitValue64(stream, slot->getWriteVersionAddr(slotPool.deviceMem),
+                slot->expectedWriteVersion, CU_STREAM_WAIT_VALUE_GEQ));
+            CUDAO_ASSERT(cuStreamWaitValue64(
+                stream, reinterpret_cast<CUdeviceptr>(slot->getReadGateAddr(slotPool.pinnedMem)), 0,
+                CU_STREAM_WAIT_VALUE_EQ));
+
+            // Launch callback
+            CUDAO_ASSERT(cuLaunchHostFunc(stream, unregisterCallback, reinterpret_cast<void*>(unregisterData)));
         }
 
         void processTask(TaskDescriptor& task) noexcept {
@@ -1884,6 +1957,9 @@ std::abort(); \
                 break;
             case TaskType::Alloc:
                 processAllocTask(task);
+                break;
+            case TaskType::Unregister:
+                processUnregisterTask(task);
                 break;
             default:
                 // Should never be reached
@@ -2109,15 +2185,60 @@ std::abort(); \
 
     template <typename T>
     cuDAOStatus cuDAOfree(T* ptr) noexcept {
-        TaskDescriptor task;
-        task.taskType = TaskType::Free;
-        task.writeArgs[0] = reinterpret_cast<void*>(ptr);
-        task.writeArgsCount = 1;
-        auto& scheduler = getDefaultScheduler();
-        if (scheduler.initStatus.err != cuDAOError::Success) {
-            return cuDAOStatus{scheduler.initStatus};
+        CUmemorytype type;
+        auto re = cuPointerGetAttribute(&type, CU_POINTER_ATTRIBUTE_MEMORY_TYPE,
+                                        reinterpret_cast<CUdeviceptr>(ptr));
+        if (re != CUDA_SUCCESS) {
+            return cuDAOStatus{cuDAOError::CudaDriverError, __func__, re};
         }
-        scheduler.submitTask(std::move(task));
+        switch (type) {
+        case CU_MEMORYTYPE_DEVICE:
+            {
+                TaskDescriptor task;
+                task.taskType = TaskType::Free;
+                task.writeArgs[0] = reinterpret_cast<void*>(ptr);
+                task.writeArgsCount = 1;
+                auto& scheduler = getDefaultScheduler();
+                if (scheduler.initStatus.err != cuDAOError::Success) {
+                    return cuDAOStatus{scheduler.initStatus};
+                }
+                scheduler.submitTask(std::move(task));
+                break;
+            }
+        case CU_MEMORYTYPE_HOST:
+            {
+                const auto res = cuMemFreeHost(reinterpret_cast<void*>(ptr));
+                if (res != CUDA_SUCCESS) {
+                    return cuDAOStatus{cuDAOError::CudaDriverError, __func__, res};
+                }
+                break;
+            }
+        case CU_MEMORYTYPE_UNIFIED:
+            {
+                TaskDescriptor task;
+                task.taskType = TaskType::Unregister;
+                task.writeArgs[0] = reinterpret_cast<void*>(ptr);
+                task.writeArgsCount = 1;
+                auto promise = std::make_shared<CudaPromise>();
+                task.promise = promise;
+                CudaFuture future{promise};
+                auto& scheduler = getDefaultScheduler();
+                if (scheduler.initStatus.err != cuDAOError::Success) {
+                    return cuDAOStatus{scheduler.initStatus};
+                }
+                scheduler.submitTask(std::move(task));
+                future.wait();
+                const auto res = cuMemFree(reinterpret_cast<CUdeviceptr>(ptr));
+                if (res != CUDA_SUCCESS) {
+                    return cuDAOStatus{cuDAOError::CudaDriverError, __func__, res};
+                }
+                break;
+            }
+        default:
+            {
+                return cuDAOStatus{cuDAOError::InvalidPtr, __func__};
+            }
+        }
         return cuDAOStatus{
             cuDAOError::Success,
             __func__
@@ -2275,7 +2396,7 @@ std::abort(); \
         return cuDAOStatus{cuDAOError::Success};
     }
 
-    template<typename T>
+    template <typename T>
     cuDAOStatus cuDAOMallocAsync(T** ptr, const size_t bytes) noexcept {
         TaskDescriptor task;
         task.taskType = TaskType::Alloc;
