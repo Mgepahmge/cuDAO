@@ -106,6 +106,8 @@ std::abort(); \
         MemcpyUtoH,
         MemcpyUtoU,
         MemcpyHtoU,
+        Alloc,
+        Register,
         Invalid
     };
 
@@ -1783,6 +1785,71 @@ std::abort(); \
             CUDAO_ASSERT(cuLaunchHostFunc(stream, completionCallBack, completionData));
         }
 
+        void processRegisterTask(TaskDescriptor& task) noexcept {
+            // Register parameters
+            auto readArg = task.readArgs[0];
+            auto [it, inserted] = slotMap->try_emplace(readArg, nullptr);
+            if (inserted) {
+                auto* slot = slotPool.alloc();
+                if (!slot) {
+                    slotMap->erase(it);
+                    errorQueue->push(cuDAOStatus{cuDAOError::SlotPoolExhausted, __func__});
+                    return;
+                }
+                it->second = slot;
+            }
+        }
+
+        void processAllocTask(TaskDescriptor& task) noexcept {
+            // Phase 1
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+            auto* syncData = new (std::nothrow) SyncCallbackData;
+            if (!syncData) {
+                errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
+                return;
+            }
+#endif
+
+            // Phase 2
+            // Get stream
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+            uint32_t streamId;
+            auto stream = streamPool.get(&streamId);
+#else
+            auto stream = streamPool.get();
+#endif
+
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+            syncData->streamId = streamId;
+            syncData->policy = &streamPool.policy;
+#endif
+
+            CUDAO_ASSERT(cuMemAllocAsync(reinterpret_cast<CUdeviceptr*>(task.writeArgs[0]), task.sharedMem, stream));
+
+            task.promise->set();
+
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+            CUDAO_ASSERT(cuLaunchHostFunc(stream, syncCallback, reinterpret_cast<void*>(syncData)));
+#endif
+            // Register
+            auto* ptr = *reinterpret_cast<void**>(task.writeArgs[0]);
+            auto [it, inserted] = slotMap->try_emplace(ptr, nullptr);
+            if (inserted) {
+                auto* slot = slotPool.alloc();
+                if (!slot) {
+                    slotMap->erase(it);
+                    errorQueue->push(cuDAOStatus{cuDAOError::SlotPoolExhausted, __func__});
+                    return;
+                }
+                it->second = slot;
+            }
+            auto* ptrSlot = it->second;
+
+            ptrSlot->expectedWriteVersion = 1;
+            CUDAO_ASSERT(cuStreamWriteValue64(stream, ptrSlot->getWriteVersionAddr(slotPool.deviceMem),
+                    ptrSlot->expectedWriteVersion, CU_STREAM_WRITE_VALUE_DEFAULT));
+        }
+
         void processTask(TaskDescriptor& task) noexcept {
             switch (task.taskType) {
             case TaskType::Kernel:
@@ -1811,6 +1878,12 @@ std::abort(); \
                 break;
             case TaskType::MemcpyUtoU:
                 processMemcpyUtoUTask(task);
+                break;
+            case TaskType::Register:
+                processRegisterTask(task);
+                break;
+            case TaskType::Alloc:
+                processAllocTask(task);
                 break;
             default:
                 // Should never be reached
@@ -2052,7 +2125,7 @@ std::abort(); \
     }
 
     template <typename T>
-    cuDAOStatus cuDAOMemcpy(T* dst, const T* src, const size_t count,
+    cuDAOStatus cuDAOMemcpy(T* dst, const T* src, const size_t bytes,
                             const cuDAOMemcpyType memcpyType = cuDAOMemcpyType::Auto) noexcept {
         TaskDescriptor task;
         switch (memcpyType) {
@@ -2093,7 +2166,7 @@ std::abort(); \
             // Should never be reached
             break;
         }
-        task.sharedMem = count;
+        task.sharedMem = bytes;
         task.writeArgsCount = 1;
         task.writeArgs[0] = reinterpret_cast<void*>(dst);
         task.readArgsCount = 1;
@@ -2107,7 +2180,7 @@ std::abort(); \
     }
 
     template <typename T>
-    std::variant<CudaFuture, cuDAOStatus> cuDAOMemcpySync(T* dst, const T* src, const size_t count,
+    std::variant<CudaFuture, cuDAOStatus> cuDAOMemcpySync(T* dst, const T* src, const size_t bytes,
                                                           const cuDAOMemcpyType memcpyType = cuDAOMemcpyType::Auto)
         noexcept {
         TaskDescriptor task;
@@ -2157,7 +2230,7 @@ std::abort(); \
             // Should never be reached
             break;
         }
-        task.sharedMem = count;
+        task.sharedMem = bytes;
         task.writeArgsCount = 1;
         task.writeArgs[0] = reinterpret_cast<void*>(dst);
         task.readArgsCount = 1;
@@ -2168,5 +2241,62 @@ std::abort(); \
         }
         scheduler.submitTask(std::move(task));
         return CudaFuture{promise};
+    }
+
+    template <typename T>
+    cuDAOStatus cuDAOMalloc(T** ptr, const size_t bytes, const cuDAOMemKind memKind = cuDAOMemKind::Device) noexcept {
+        CUresult re;
+        TaskDescriptor task;
+        task.taskType = TaskType::Register;
+        switch (memKind) {
+        case cuDAOMemKind::Device:
+            re = cuMemAlloc(reinterpret_cast<CUdeviceptr*>(ptr), bytes);
+            break;
+        case cuDAOMemKind::Host:
+            re = cuMemAllocHost(reinterpret_cast<void**>(ptr), bytes);
+            break;
+        case cuDAOMemKind::Unified:
+            re = cuMemAllocManaged(reinterpret_cast<CUdeviceptr*>(ptr), bytes, 0);
+            break;
+        default:
+            re = CUDA_ERROR_INVALID_VALUE;
+            break;
+        }
+        if (re != CUDA_SUCCESS) {
+            return cuDAOStatus{cuDAOError::CudaDriverError, __func__, re};
+        }
+        task.readArgs[0] = reinterpret_cast<void*>(*ptr);
+        task.readArgsCount = 1;
+        auto& scheduler = getDefaultScheduler();
+        if (scheduler.initStatus.err != cuDAOError::Success) {
+            return cuDAOStatus{scheduler.initStatus};
+        }
+        scheduler.submitTask(std::move(task));
+        return cuDAOStatus{cuDAOError::Success};
+    }
+
+    template<typename T>
+    cuDAOStatus cuDAOMallocAsync(T** ptr, const size_t bytes) noexcept {
+        TaskDescriptor task;
+        task.taskType = TaskType::Alloc;
+        task.writeArgs[0] = reinterpret_cast<void*>(ptr);
+        task.writeArgsCount = 1;
+        task.sharedMem = bytes;
+        std::shared_ptr<CudaPromise> promise;
+        try {
+            promise = std::make_shared<CudaPromise>();
+            task.promise = promise;
+        }
+        catch (const std::bad_alloc&) {
+            return cuDAOStatus{cuDAOError::InternalError, __func__};
+        }
+        CudaFuture future{promise};
+        auto& scheduler = getDefaultScheduler();
+        if (scheduler.initStatus.err != cuDAOError::Success) {
+            return cuDAOStatus{scheduler.initStatus};
+        }
+        scheduler.submitTask(std::move(task));
+        future.wait();
+        return cuDAOStatus{cuDAOError::Success};
     }
 }
