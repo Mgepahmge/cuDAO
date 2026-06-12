@@ -103,10 +103,8 @@ std::abort(); \
         MemcpyHtoD,
         MemcpyDtoH,
         MemcpyDtoD,
-        MemcpyUtoD,
         MemcpyUtoH,
         MemcpyUtoU,
-        MemcpyDtoU,
         MemcpyHtoU,
         Invalid
     };
@@ -144,8 +142,8 @@ std::abort(); \
         inline constexpr TaskType MemcpyTypeTable[3][3] = {
             // dst/src      Host                   Device                Unified
             /* Host*/ {TaskType::Invalid, TaskType::MemcpyDtoH, TaskType::MemcpyUtoH},
-            /* Device*/ {TaskType::MemcpyHtoD, TaskType::MemcpyDtoD, TaskType::MemcpyUtoD},
-            /* Unified*/ {TaskType::MemcpyHtoU, TaskType::MemcpyDtoU, TaskType::MemcpyUtoU}
+            /* Device*/ {TaskType::MemcpyHtoD, TaskType::MemcpyDtoD, TaskType::MemcpyUtoU},
+            /* Unified*/ {TaskType::MemcpyHtoU, TaskType::MemcpyUtoU, TaskType::MemcpyUtoU}
         };
     }
 
@@ -974,7 +972,9 @@ std::abort(); \
             auto streamId = data_->streamId;
             policy->complete(streamId);
 #endif
-            promise->set();
+            if (promise) {
+                promise->set();
+            }
             delete data_;
         }
 
@@ -1253,6 +1253,536 @@ std::abort(); \
             CUDAO_ASSERT(cuLaunchHostFunc(stream, freeCallback, reinterpret_cast<void*>(freeData)));
         }
 
+        void processMemcpyDtoDTask(TaskDescriptor& task) noexcept {
+            // Phase 1 : Reversible operations
+            // Allocate callback data
+            auto* completionData = new(std::nothrow) CompletionCallbackData;
+            if (!completionData) {
+                errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
+                return;
+            }
+            completionData->readArgsCount = task.readArgsCount;
+            completionData->promise = task.promise.get();
+            completionData->slotPool = &slotPool;
+            auto* readData = new(std::nothrow) ReadCallbackData{
+                &completionData->readSlots,
+                task.readArgsCount,
+                &slotPool
+            };
+            if (!readData) {
+                errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
+                delete completionData;
+                return;
+            }
+
+            // Register parameters
+            {
+                auto writeArg = task.writeArgs[0];
+                auto [it, inserted] = slotMap->try_emplace(writeArg, nullptr);
+                if (inserted) {
+                    auto* slot = slotPool.alloc();
+                    if (!slot) {
+                        slotMap->erase(it);
+                        delete readData;
+                        delete completionData;
+                        errorQueue->push(cuDAOStatus{cuDAOError::SlotPoolExhausted, __func__});
+                        return;
+                    }
+                    it->second = slot;
+                }
+                auto slot = it->second;
+                writeSlotsCache[0] = slot;
+            }
+            {
+                auto readArg = task.readArgs[0];
+                auto [it, inserted] = slotMap->try_emplace(readArg, nullptr);
+                if (inserted) {
+                    auto* slot = slotPool.alloc();
+                    if (!slot) {
+                        slotMap->erase(it);
+                        delete readData;
+                        delete completionData;
+                        errorQueue->push(cuDAOStatus{cuDAOError::SlotPoolExhausted, __func__});
+                        return;
+                    }
+                    it->second = slot;
+                }
+                auto slot = it->second;
+                completionData->readSlots[0] = slot;
+            }
+
+            // Phase 2 : Irreversible operations
+            // Get stream
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+            uint32_t streamId;
+            auto stream = streamPool.get(&streamId);
+#else
+            auto stream = streamPool.get();
+#endif
+
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+            completionData->streamId = streamId;
+            completionData->policy = &streamPool.policy;
+#endif
+
+            // Wait write version
+            {
+                auto* slot = writeSlotsCache[0];
+                CUDAO_ASSERT(cuStreamWaitValue64(stream, slot->getWriteVersionAddr(slotPool.deviceMem),
+                    slot->expectedWriteVersion, CU_STREAM_WAIT_VALUE_GEQ));
+                ++slot->expectedWriteVersion;
+            }
+            {
+                auto* slot = completionData->readSlots[0];
+                CUDAO_ASSERT(cuStreamWaitValue64(stream, slot->getWriteVersionAddr(slotPool.deviceMem),
+                    slot->expectedWriteVersion, CU_STREAM_WAIT_VALUE_GEQ));
+            }
+
+            // Wait read gate
+            {
+                auto* slot = writeSlotsCache[0];
+
+                CUDAO_ASSERT(cuStreamWaitValue64(
+                    stream, reinterpret_cast<CUdeviceptr>(slot->getReadGateAddr(slotPool.pinnedMem)), 0,
+                    CU_STREAM_WAIT_VALUE_EQ));
+            }
+
+            // Launch read start callback
+            CUDAO_ASSERT(cuLaunchHostFunc(stream, readStartCallback, readData));
+
+            // Memcpy
+            CUDAO_ASSERT(
+                cuMemcpyDtoDAsync(reinterpret_cast<CUdeviceptr>(task.writeArgs[0]),reinterpret_cast<CUdeviceptr>(task.
+                    readArgs[0]),task.sharedMem,stream));
+
+            // Update write version
+            {
+                auto* slot = writeSlotsCache[0];
+
+                CUDAO_ASSERT(cuStreamWriteValue64(stream, slot->getWriteVersionAddr(slotPool.deviceMem),
+                    slot->expectedWriteVersion, CU_STREAM_WRITE_VALUE_DEFAULT));
+            }
+
+            // Launch completion callback
+            CUDAO_ASSERT(cuLaunchHostFunc(stream, completionCallBack, completionData));
+        }
+
+        void processMemcpyHtoDTask(TaskDescriptor& task) noexcept {
+            // Phase 1 : Reversible operations
+            // Allocate callback data
+            auto* syncData = new(std::nothrow) SyncCallbackData{
+                task.promise.get()
+            };
+            if (!syncData) {
+                errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
+                return;
+            }
+
+            // Register parameters
+            {
+                auto writeArg = task.writeArgs[0];
+                auto [it, inserted] = slotMap->try_emplace(writeArg, nullptr);
+                if (inserted) {
+                    auto* slot = slotPool.alloc();
+                    if (!slot) {
+                        slotMap->erase(it);
+                        delete syncData;
+                        errorQueue->push(cuDAOStatus{cuDAOError::SlotPoolExhausted, __func__});
+                        return;
+                    }
+                    it->second = slot;
+                }
+                auto slot = it->second;
+                writeSlotsCache[0] = slot;
+            }
+
+            // Phase 2 : Irreversible operations
+            // Get stream
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+            uint32_t streamId;
+            auto stream = streamPool.get(&streamId);
+#else
+            auto stream = streamPool.get();
+#endif
+
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+            syncData->streamId = streamId;
+            syncData->policy = &streamPool.policy;
+#endif
+
+            // Wait write version
+            {
+                auto* slot = writeSlotsCache[0];
+                CUDAO_ASSERT(cuStreamWaitValue64(stream, slot->getWriteVersionAddr(slotPool.deviceMem),
+                    slot->expectedWriteVersion, CU_STREAM_WAIT_VALUE_GEQ));
+                ++slot->expectedWriteVersion;
+            }
+
+            // Wait read gate
+            {
+                auto* slot = writeSlotsCache[0];
+
+                CUDAO_ASSERT(cuStreamWaitValue64(
+                    stream, reinterpret_cast<CUdeviceptr>(slot->getReadGateAddr(slotPool.pinnedMem)), 0,
+                    CU_STREAM_WAIT_VALUE_EQ));
+            }
+
+            // Memcpy
+            CUDAO_ASSERT(
+                cuMemcpyHtoDAsync(reinterpret_cast<CUdeviceptr>(task.writeArgs[0]),task.readArgs[0],task.sharedMem,
+                    stream));
+
+            // Update write version
+            {
+                auto* slot = writeSlotsCache[0];
+
+                CUDAO_ASSERT(cuStreamWriteValue64(stream, slot->getWriteVersionAddr(slotPool.deviceMem),
+                    slot->expectedWriteVersion, CU_STREAM_WRITE_VALUE_DEFAULT));
+            }
+
+            // Launch sync callback
+            CUDAO_ASSERT(cuLaunchHostFunc(stream, syncCallback, reinterpret_cast<void*>(syncData)));
+        }
+
+        void processMemcpyDtoHTask(TaskDescriptor& task) noexcept {
+            // Phase 1 : Reversible operations
+            // Allocate callback data
+            auto* completionData = new(std::nothrow) CompletionCallbackData;
+            if (!completionData) {
+                errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
+                return;
+            }
+            completionData->readArgsCount = task.readArgsCount;
+            completionData->promise = task.promise.get();
+            completionData->slotPool = &slotPool;
+            auto* readData = new(std::nothrow) ReadCallbackData{
+                &completionData->readSlots,
+                task.readArgsCount,
+                &slotPool
+            };
+            if (!readData) {
+                errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
+                delete completionData;
+                return;
+            }
+
+            // Register parameters
+            {
+                auto readArg = task.readArgs[0];
+                auto [it, inserted] = slotMap->try_emplace(readArg, nullptr);
+                if (inserted) {
+                    auto* slot = slotPool.alloc();
+                    if (!slot) {
+                        slotMap->erase(it);
+                        delete readData;
+                        delete completionData;
+                        errorQueue->push(cuDAOStatus{cuDAOError::SlotPoolExhausted, __func__});
+                        return;
+                    }
+                    it->second = slot;
+                }
+                auto slot = it->second;
+                completionData->readSlots[0] = slot;
+            }
+
+            // Phase 2 : Irreversible operations
+            // Get stream
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+            uint32_t streamId;
+            auto stream = streamPool.get(&streamId);
+#else
+            auto stream = streamPool.get();
+#endif
+
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+            completionData->streamId = streamId;
+            completionData->policy = &streamPool.policy;
+#endif
+
+            // Wait write version
+            {
+                auto* slot = completionData->readSlots[0];
+                CUDAO_ASSERT(cuStreamWaitValue64(stream, slot->getWriteVersionAddr(slotPool.deviceMem),
+                    slot->expectedWriteVersion, CU_STREAM_WAIT_VALUE_GEQ));
+            }
+
+            // Launch read start callback
+            CUDAO_ASSERT(cuLaunchHostFunc(stream, readStartCallback, readData));
+
+            // Memcpy
+            CUDAO_ASSERT(
+                cuMemcpyDtoHAsync(task.writeArgs[0],reinterpret_cast<CUdeviceptr>(task.readArgs[0]),task.sharedMem,
+                    stream));
+
+            // Launch completion callback
+            CUDAO_ASSERT(cuLaunchHostFunc(stream, completionCallBack, completionData));
+        }
+
+        void processMemcpyUtoUTask(TaskDescriptor& task) noexcept {
+            // Phase 1 : Reversible operations
+            // Allocate callback data
+            auto* completionData = new(std::nothrow) CompletionCallbackData;
+            if (!completionData) {
+                errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
+                return;
+            }
+            completionData->readArgsCount = task.readArgsCount;
+            completionData->promise = task.promise.get();
+            completionData->slotPool = &slotPool;
+            auto* readData = new(std::nothrow) ReadCallbackData{
+                &completionData->readSlots,
+                task.readArgsCount,
+                &slotPool
+            };
+            if (!readData) {
+                errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
+                delete completionData;
+                return;
+            }
+
+            // Register parameters
+            {
+                auto writeArg = task.writeArgs[0];
+                auto [it, inserted] = slotMap->try_emplace(writeArg, nullptr);
+                if (inserted) {
+                    auto* slot = slotPool.alloc();
+                    if (!slot) {
+                        slotMap->erase(it);
+                        delete readData;
+                        delete completionData;
+                        errorQueue->push(cuDAOStatus{cuDAOError::SlotPoolExhausted, __func__});
+                        return;
+                    }
+                    it->second = slot;
+                }
+                auto slot = it->second;
+                writeSlotsCache[0] = slot;
+            }
+            {
+                auto readArg = task.readArgs[0];
+                auto [it, inserted] = slotMap->try_emplace(readArg, nullptr);
+                if (inserted) {
+                    auto* slot = slotPool.alloc();
+                    if (!slot) {
+                        slotMap->erase(it);
+                        delete readData;
+                        delete completionData;
+                        errorQueue->push(cuDAOStatus{cuDAOError::SlotPoolExhausted, __func__});
+                        return;
+                    }
+                    it->second = slot;
+                }
+                auto slot = it->second;
+                completionData->readSlots[0] = slot;
+            }
+
+            // Phase 2 : Irreversible operations
+            // Get stream
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+            uint32_t streamId;
+            auto stream = streamPool.get(&streamId);
+#else
+            auto stream = streamPool.get();
+#endif
+
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+            completionData->streamId = streamId;
+            completionData->policy = &streamPool.policy;
+#endif
+
+            // Wait write version
+            {
+                auto* slot = writeSlotsCache[0];
+                CUDAO_ASSERT(cuStreamWaitValue64(stream, slot->getWriteVersionAddr(slotPool.deviceMem),
+                    slot->expectedWriteVersion, CU_STREAM_WAIT_VALUE_GEQ));
+                ++slot->expectedWriteVersion;
+            }
+            {
+                auto* slot = completionData->readSlots[0];
+                CUDAO_ASSERT(cuStreamWaitValue64(stream, slot->getWriteVersionAddr(slotPool.deviceMem),
+                    slot->expectedWriteVersion, CU_STREAM_WAIT_VALUE_GEQ));
+            }
+
+            // Wait read gate
+            {
+                auto* slot = writeSlotsCache[0];
+
+                CUDAO_ASSERT(cuStreamWaitValue64(
+                    stream, reinterpret_cast<CUdeviceptr>(slot->getReadGateAddr(slotPool.pinnedMem)), 0,
+                    CU_STREAM_WAIT_VALUE_EQ));
+            }
+
+            // Launch read start callback
+            CUDAO_ASSERT(cuLaunchHostFunc(stream, readStartCallback, readData));
+
+            // Memcpy
+            CUDAO_ASSERT(
+                cuMemcpyAsync(reinterpret_cast<CUdeviceptr>(task.writeArgs[0]),reinterpret_cast<CUdeviceptr>(task.
+                    readArgs[0]),task.sharedMem,stream));
+
+            // Update write version
+            {
+                auto* slot = writeSlotsCache[0];
+
+                CUDAO_ASSERT(cuStreamWriteValue64(stream, slot->getWriteVersionAddr(slotPool.deviceMem),
+                    slot->expectedWriteVersion, CU_STREAM_WRITE_VALUE_DEFAULT));
+            }
+
+            // Launch completion callback
+            CUDAO_ASSERT(cuLaunchHostFunc(stream, completionCallBack, completionData));
+        }
+
+        void processMemcpyHtoUTask(TaskDescriptor& task) noexcept {
+            // Phase 1 : Reversible operations
+            // Allocate callback data
+            auto* syncData = new(std::nothrow) SyncCallbackData{
+                task.promise.get()
+            };
+            if (!syncData) {
+                errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
+                return;
+            }
+
+            // Register parameters
+            {
+                auto writeArg = task.writeArgs[0];
+                auto [it, inserted] = slotMap->try_emplace(writeArg, nullptr);
+                if (inserted) {
+                    auto* slot = slotPool.alloc();
+                    if (!slot) {
+                        slotMap->erase(it);
+                        delete syncData;
+                        errorQueue->push(cuDAOStatus{cuDAOError::SlotPoolExhausted, __func__});
+                        return;
+                    }
+                    it->second = slot;
+                }
+                auto slot = it->second;
+                writeSlotsCache[0] = slot;
+            }
+
+            // Phase 2 : Irreversible operations
+            // Get stream
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+            uint32_t streamId;
+            auto stream = streamPool.get(&streamId);
+#else
+            auto stream = streamPool.get();
+#endif
+
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+            syncData->streamId = streamId;
+            syncData->policy = &streamPool.policy;
+#endif
+
+            // Wait write version
+            {
+                auto* slot = writeSlotsCache[0];
+                CUDAO_ASSERT(cuStreamWaitValue64(stream, slot->getWriteVersionAddr(slotPool.deviceMem),
+                    slot->expectedWriteVersion, CU_STREAM_WAIT_VALUE_GEQ));
+                ++slot->expectedWriteVersion;
+            }
+
+            // Wait read gate
+            {
+                auto* slot = writeSlotsCache[0];
+
+                CUDAO_ASSERT(cuStreamWaitValue64(
+                    stream, reinterpret_cast<CUdeviceptr>(slot->getReadGateAddr(slotPool.pinnedMem)), 0,
+                    CU_STREAM_WAIT_VALUE_EQ));
+            }
+
+            // Memcpy
+            CUDAO_ASSERT(
+                cuMemcpyAsync(reinterpret_cast<CUdeviceptr>(task.writeArgs[0]),reinterpret_cast<CUdeviceptr>(task.
+                    readArgs[0]),task.sharedMem,stream));
+
+            // Update write version
+            {
+                auto* slot = writeSlotsCache[0];
+
+                CUDAO_ASSERT(cuStreamWriteValue64(stream, slot->getWriteVersionAddr(slotPool.deviceMem),
+                    slot->expectedWriteVersion, CU_STREAM_WRITE_VALUE_DEFAULT));
+            }
+
+            // Launch sync callback
+            CUDAO_ASSERT(cuLaunchHostFunc(stream, syncCallback, reinterpret_cast<void*>(syncData)));
+        }
+
+        void processMemcpyUtoHTask(TaskDescriptor& task) noexcept {
+            // Phase 1 : Reversible operations
+            // Allocate callback data
+            auto* completionData = new(std::nothrow) CompletionCallbackData;
+            if (!completionData) {
+                errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
+                return;
+            }
+            completionData->readArgsCount = task.readArgsCount;
+            completionData->promise = task.promise.get();
+            completionData->slotPool = &slotPool;
+            auto* readData = new(std::nothrow) ReadCallbackData{
+                &completionData->readSlots,
+                task.readArgsCount,
+                &slotPool
+            };
+            if (!readData) {
+                errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
+                delete completionData;
+                return;
+            }
+
+            // Register parameters
+            {
+                auto readArg = task.readArgs[0];
+                auto [it, inserted] = slotMap->try_emplace(readArg, nullptr);
+                if (inserted) {
+                    auto* slot = slotPool.alloc();
+                    if (!slot) {
+                        slotMap->erase(it);
+                        delete readData;
+                        delete completionData;
+                        errorQueue->push(cuDAOStatus{cuDAOError::SlotPoolExhausted, __func__});
+                        return;
+                    }
+                    it->second = slot;
+                }
+                auto slot = it->second;
+                completionData->readSlots[0] = slot;
+            }
+
+            // Phase 2 : Irreversible operations
+            // Get stream
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+            uint32_t streamId;
+            auto stream = streamPool.get(&streamId);
+#else
+            auto stream = streamPool.get();
+#endif
+
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+            completionData->streamId = streamId;
+            completionData->policy = &streamPool.policy;
+#endif
+
+            // Wait write version
+            {
+                auto* slot = completionData->readSlots[0];
+                CUDAO_ASSERT(cuStreamWaitValue64(stream, slot->getWriteVersionAddr(slotPool.deviceMem),
+                    slot->expectedWriteVersion, CU_STREAM_WAIT_VALUE_GEQ));
+            }
+
+            // Launch read start callback
+            CUDAO_ASSERT(cuLaunchHostFunc(stream, readStartCallback, readData));
+
+            // Memcpy
+            CUDAO_ASSERT(
+                cuMemcpyAsync(reinterpret_cast<CUdeviceptr>(task.writeArgs[0]),reinterpret_cast<CUdeviceptr>(task.
+                    readArgs[0]),task.sharedMem,stream));
+
+            // Launch completion callback
+            CUDAO_ASSERT(cuLaunchHostFunc(stream, completionCallBack, completionData));
+        }
+
         void processTask(TaskDescriptor& task) noexcept {
             switch (task.taskType) {
             case TaskType::Kernel:
@@ -1263,6 +1793,24 @@ std::abort(); \
                 break;
             case TaskType::Free:
                 processFreeTask(task);
+                break;
+            case TaskType::MemcpyDtoD:
+                processMemcpyDtoDTask(task);
+                break;
+            case TaskType::MemcpyDtoH:
+                processMemcpyDtoHTask(task);
+                break;
+            case TaskType::MemcpyHtoD:
+                processMemcpyHtoDTask(task);
+                break;
+            case TaskType::MemcpyHtoU:
+                processMemcpyHtoUTask(task);
+                break;
+            case TaskType::MemcpyUtoH:
+                processMemcpyUtoHTask(task);
+                break;
+            case TaskType::MemcpyUtoU:
+                processMemcpyUtoUTask(task);
                 break;
             default:
                 // Should never be reached
@@ -1518,20 +2066,29 @@ std::abort(); \
             task.taskType = TaskType::MemcpyDtoD;
             break;
         case cuDAOMemcpyType::Auto:
-            CUmemorytype dstType, srcType;
-            auto re = cuPointerGetAttribute(&dstType, CU_POINTER_ATTRIBUTE_MEMORY_TYPE,
-                                            reinterpret_cast<CUdeviceptr>(dst));
-            if (re != CUDA_SUCCESS) {
-                return cuDAOStatus{cuDAOError::CudaDriverError, __func__, re};
+            {
+                CUmemorytype dstType, srcType;
+                auto re = cuPointerGetAttribute(&dstType, CU_POINTER_ATTRIBUTE_MEMORY_TYPE,
+                                                reinterpret_cast<CUdeviceptr>(dst));
+                if (re == CUDA_ERROR_INVALID_VALUE) {
+                    dstType = CU_MEMORYTYPE_HOST;
+                }
+                else if (re != CUDA_SUCCESS) {
+                    return cuDAOStatus{cuDAOError::CudaDriverError, __func__, re};
+                }
+                re = cuPointerGetAttribute(&srcType, CU_POINTER_ATTRIBUTE_MEMORY_TYPE,
+                                           reinterpret_cast<CUdeviceptr>(src));
+                if (re == CUDA_ERROR_INVALID_VALUE) {
+                    srcType = CU_MEMORYTYPE_HOST;
+                }
+                else if (re != CUDA_SUCCESS) {
+                    return cuDAOStatus{cuDAOError::CudaDriverError, __func__, re};
+                }
+                if (!getMemcpyTaskType(dstType, srcType, task.taskType)) {
+                    return cuDAOStatus{cuDAOError::InvalidPtr, __func__};
+                }
+                break;
             }
-            re = cuPointerGetAttribute(&srcType, CU_POINTER_ATTRIBUTE_MEMORY_TYPE, reinterpret_cast<CUdeviceptr>(src));
-            if (re != CUDA_SUCCESS) {
-                return cuDAOStatus{cuDAOError::CudaDriverError, __func__, re};
-            }
-            if (!getMemcpyTaskType(dstType, srcType, task.taskType)) {
-                return cuDAOStatus{cuDAOError::InvalidPtr, __func__};
-            }
-            break;
         default:
             // Should never be reached
             break;
@@ -1571,20 +2128,29 @@ std::abort(); \
             task.taskType = TaskType::MemcpyDtoD;
             break;
         case cuDAOMemcpyType::Auto:
-            CUmemorytype dstType, srcType;
-            auto re = cuPointerGetAttribute(&dstType, CU_POINTER_ATTRIBUTE_MEMORY_TYPE,
-                                            reinterpret_cast<CUdeviceptr>(dst));
-            if (re != CUDA_SUCCESS) {
-                return cuDAOStatus{cuDAOError::CudaDriverError, __func__, re};
+            {
+                CUmemorytype dstType, srcType;
+                auto re = cuPointerGetAttribute(&dstType, CU_POINTER_ATTRIBUTE_MEMORY_TYPE,
+                                                reinterpret_cast<CUdeviceptr>(dst));
+                if (re == CUDA_ERROR_INVALID_VALUE) {
+                    dstType = CU_MEMORYTYPE_HOST;
+                }
+                else if (re != CUDA_SUCCESS) {
+                    return cuDAOStatus{cuDAOError::CudaDriverError, __func__, re};
+                }
+                re = cuPointerGetAttribute(&srcType, CU_POINTER_ATTRIBUTE_MEMORY_TYPE,
+                                           reinterpret_cast<CUdeviceptr>(src));
+                if (re == CUDA_ERROR_INVALID_VALUE) {
+                    srcType = CU_MEMORYTYPE_HOST;
+                }
+                else if (re != CUDA_SUCCESS) {
+                    return cuDAOStatus{cuDAOError::CudaDriverError, __func__, re};
+                }
+                if (!getMemcpyTaskType(dstType, srcType, task.taskType)) {
+                    return cuDAOStatus{cuDAOError::InvalidPtr, __func__};
+                }
+                break;
             }
-            re = cuPointerGetAttribute(&srcType, CU_POINTER_ATTRIBUTE_MEMORY_TYPE, reinterpret_cast<CUdeviceptr>(src));
-            if (re != CUDA_SUCCESS) {
-                return cuDAOStatus{cuDAOError::CudaDriverError, __func__, re};
-            }
-            if (!getMemcpyTaskType(dstType, srcType, task.taskType)) {
-                return cuDAOStatus{cuDAOError::InvalidPtr, __func__};
-            }
-            break;
         default:
             // Should never be reached
             break;
