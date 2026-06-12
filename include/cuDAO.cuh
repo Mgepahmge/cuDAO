@@ -1888,7 +1888,7 @@ std::abort(); \
 
             // Phase 1 : Reversible operations
             // Allocate free callback data
-            auto* unregisterData = new (std::nothrow) UnregisterCallbackData{
+            auto* unregisterData = new(std::nothrow) UnregisterCallbackData{
                 &slotPool,
                 ptr,
                 task.promise.get()
@@ -2185,58 +2185,67 @@ std::abort(); \
 
     template <typename T>
     cuDAOStatus cuDAOfree(T* ptr) noexcept {
-        CUmemorytype type;
-        auto re = cuPointerGetAttribute(&type, CU_POINTER_ATTRIBUTE_MEMORY_TYPE,
-                                        reinterpret_cast<CUdeviceptr>(ptr));
-        if (re != CUDA_SUCCESS) {
+        if (!ptr) {
+            return cuDAOStatus{cuDAOError::InvalidPtr, __func__};
+        }
+        unsigned int memType = 0, isManaged = 0;
+        void* memAttr[2] = {&memType, &isManaged};
+        CUpointer_attribute attrs[2] = {CU_POINTER_ATTRIBUTE_MEMORY_TYPE, CU_POINTER_ATTRIBUTE_IS_MANAGED};
+        if (const auto re = cuPointerGetAttributes(2, attrs, memAttr,
+                                                   reinterpret_cast<CUdeviceptr>(ptr)); re != CUDA_SUCCESS) {
             return cuDAOStatus{cuDAOError::CudaDriverError, __func__, re};
         }
-        switch (type) {
-        case CU_MEMORYTYPE_DEVICE:
-            {
-                TaskDescriptor task;
-                task.taskType = TaskType::Free;
-                task.writeArgs[0] = reinterpret_cast<void*>(ptr);
-                task.writeArgsCount = 1;
-                auto& scheduler = getDefaultScheduler();
-                if (scheduler.initStatus.err != cuDAOError::Success) {
-                    return cuDAOStatus{scheduler.initStatus};
-                }
-                scheduler.submitTask(std::move(task));
-                break;
+        if (isManaged) {
+            TaskDescriptor task;
+            task.taskType = TaskType::Unregister;
+            task.writeArgs[0] = reinterpret_cast<void*>(ptr);
+            task.writeArgsCount = 1;
+            std::shared_ptr<CudaPromise> promise;
+            try {
+                promise = std::make_shared<CudaPromise>();
+            } catch (std::bad_alloc&) {
+                return cuDAOStatus{cuDAOError::HostAllocationFailed, __func__};
             }
-        case CU_MEMORYTYPE_HOST:
-            {
-                const auto res = cuMemFreeHost(reinterpret_cast<void*>(ptr));
-                if (res != CUDA_SUCCESS) {
-                    return cuDAOStatus{cuDAOError::CudaDriverError, __func__, res};
-                }
-                break;
+            task.promise = promise;
+            CudaFuture future{promise};
+            auto& scheduler = getDefaultScheduler();
+            if (scheduler.initStatus.err != cuDAOError::Success) {
+                return cuDAOStatus{scheduler.initStatus};
             }
-        case CU_MEMORYTYPE_UNIFIED:
-            {
-                TaskDescriptor task;
-                task.taskType = TaskType::Unregister;
-                task.writeArgs[0] = reinterpret_cast<void*>(ptr);
-                task.writeArgsCount = 1;
-                auto promise = std::make_shared<CudaPromise>();
-                task.promise = promise;
-                CudaFuture future{promise};
-                auto& scheduler = getDefaultScheduler();
-                if (scheduler.initStatus.err != cuDAOError::Success) {
-                    return cuDAOStatus{scheduler.initStatus};
-                }
-                scheduler.submitTask(std::move(task));
-                future.wait();
-                const auto res = cuMemFree(reinterpret_cast<CUdeviceptr>(ptr));
-                if (res != CUDA_SUCCESS) {
-                    return cuDAOStatus{cuDAOError::CudaDriverError, __func__, res};
-                }
-                break;
+            scheduler.submitTask(std::move(task));
+            future.wait();
+            const auto res = cuMemFree(reinterpret_cast<CUdeviceptr>(ptr));
+            if (res != CUDA_SUCCESS) {
+                return cuDAOStatus{cuDAOError::CudaDriverError, __func__, res};
             }
-        default:
-            {
-                return cuDAOStatus{cuDAOError::InvalidPtr, __func__};
+        }
+        else {
+            switch (static_cast<CUmemorytype>(memType)) {
+            case CU_MEMORYTYPE_DEVICE:
+                {
+                    TaskDescriptor task;
+                    task.taskType = TaskType::Free;
+                    task.writeArgs[0] = reinterpret_cast<void*>(ptr);
+                    task.writeArgsCount = 1;
+                    auto& scheduler = getDefaultScheduler();
+                    if (scheduler.initStatus.err != cuDAOError::Success) {
+                        return cuDAOStatus{scheduler.initStatus};
+                    }
+                    scheduler.submitTask(std::move(task));
+                    break;
+                }
+            case CU_MEMORYTYPE_HOST:
+                {
+                    const auto res = cuMemFreeHost(reinterpret_cast<void*>(ptr));
+                    if (res != CUDA_SUCCESS) {
+                        return cuDAOStatus{cuDAOError::CudaDriverError, __func__, res};
+                    }
+                    break;
+                }
+            default:
+                {
+                    return cuDAOStatus{cuDAOError::InvalidPtr, __func__};
+                }
             }
         }
         return cuDAOStatus{

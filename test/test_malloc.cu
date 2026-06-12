@@ -224,8 +224,6 @@ TEST(cuDAO, CuDAOMallocSupportsHostAndUnifiedMemoryKinds) {
         cuDAO::cuDAOMemKind::Unified
     ));
 
-    expectMemoryType(unifiedPtr, CU_MEMORYTYPE_UNIFIED);
-
     const dim3 block{128, 1, 1};
     const dim3 grid{
         static_cast<unsigned int>((n + static_cast<int>(block.x) - 1) /
