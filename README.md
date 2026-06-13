@@ -91,6 +91,38 @@ cmake --install build
 
 Installs headers and CMake package config, enabling use via `find_package(cuDAO)` in downstream projects.
 
+### Documentation
+
+The latest generated documentation is available at:
+
+```text
+https://mgepahmge.github.io/cuDAO-docs/
+```
+
+Versioned documentation is also published for release tags, for example:
+
+```text
+https://mgepahmge.github.io/cuDAO-docs/v0.1.1/
+```
+
+To build the documentation locally, install Doxygen and Graphviz first:
+
+```bash
+sudo apt-get install -y doxygen graphviz
+```
+
+Then run:
+
+```bash
+./docs/generate_docs.sh
+```
+
+The generated HTML entry point is:
+
+```text
+build/docs/html/index.html
+```
+
 ---
 
 ## Usage
