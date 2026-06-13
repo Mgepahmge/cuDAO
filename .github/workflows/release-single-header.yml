@@ -1,0 +1,207 @@
+name: Release single header
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag, for example v0.1.0'
+        required: true
+        type: string
+
+concurrency:
+  group: cudao-release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  GPU_WORKFLOW_NAME: cuDAO GPU CI
+
+jobs:
+  release:
+    name: Generate and publish single header
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          fetch-depth: 0
+
+      - name: Resolve release tag
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch --force --tags
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+
+          if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "Tag ${TAG} does not exist."
+            exit 1
+          fi
+
+          TAG_SHA="$(git rev-list -n 1 "${TAG}")"
+
+          echo "Resolved tag: ${TAG}"
+          echo "Resolved commit: ${TAG_SHA}"
+
+          echo "name=${TAG}" >> "${GITHUB_OUTPUT}"
+          echo "sha=${TAG_SHA}" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify tag is on main
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG_SHA="${{ steps.tag.outputs.sha }}"
+
+          git fetch origin main --force
+
+          if ! git merge-base --is-ancestor "${TAG_SHA}" origin/main; then
+            echo "Tag ${{ steps.tag.outputs.name }} does not point to a commit reachable from origin/main."
+            echo "Release tags must point to commits that have gone through the main-branch GPU CI."
+            exit 1
+          fi
+
+      - name: Verify GPU CI passed for this commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          TAG_SHA="${{ steps.tag.outputs.sha }}"
+
+          echo "Checking successful '${GPU_WORKFLOW_NAME}' run for commit ${TAG_SHA} on main..."
+
+          GPU_RUN_URL=""
+
+          for attempt in $(seq 1 30); do
+            GPU_RUN_URL="$(
+              gh run list \
+                --workflow "${GPU_WORKFLOW_NAME}" \
+                --commit "${TAG_SHA}" \
+                --branch main \
+                --event push \
+                --status success \
+                --limit 1 \
+                --json url \
+                --jq '.[0].url // empty'
+            )"
+
+            if [ -n "${GPU_RUN_URL}" ]; then
+              echo "Found successful GPU CI run: ${GPU_RUN_URL}"
+              exit 0
+            fi
+
+            echo "No successful GPU CI run found yet for ${TAG_SHA}. Attempt ${attempt}/30."
+            sleep 60
+          done
+
+          echo "No successful GPU CI run was found for commit ${TAG_SHA} on main."
+          echo "Recent GPU CI runs for this commit:"
+
+          gh run list \
+            --workflow "${GPU_WORKFLOW_NAME}" \
+            --commit "${TAG_SHA}" \
+            --limit 10 || true
+
+          exit 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Generate single header
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist
+
+          python3 tools/amalgamate.py \
+            --root include \
+            --input include/cuDAO.cuh \
+            --output dist/cuDAO.cuh
+
+          test -s dist/cuDAO.cuh
+
+      - name: Validate generated header
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if grep -nE '^[[:space:]]*#include[[:space:]]+"cuDAO/' dist/cuDAO.cuh; then
+            echo "Generated single header still contains project-local cuDAO includes."
+            exit 1
+          fi
+
+          if grep -nE '^[[:space:]]*#include[[:space:]]+"version\.h"' dist/cuDAO.cuh; then
+            echo "Generated single header still contains version.h include."
+            exit 1
+          fi
+
+      - name: Package release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="${{ steps.tag.outputs.name }}"
+          PACKAGE_DIR="cuDAO-${TAG}"
+
+          mkdir -p "${PACKAGE_DIR}"
+
+          cp dist/cuDAO.cuh "${PACKAGE_DIR}/cuDAO.cuh"
+          cp README.md "${PACKAGE_DIR}/README.md"
+
+          if [ -f LICENSE ]; then
+            cp LICENSE "${PACKAGE_DIR}/LICENSE"
+          fi
+
+          tar -czf "cuDAO-${TAG}-single-header.tar.gz" "${PACKAGE_DIR}"
+
+          sha256sum \
+            dist/cuDAO.cuh \
+            "cuDAO-${TAG}-single-header.tar.gz" \
+            > SHA256SUMS
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          TAG="${{ steps.tag.outputs.name }}"
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists. Uploading assets with --clobber."
+
+            gh release upload "${TAG}" \
+              dist/cuDAO.cuh \
+              "cuDAO-${TAG}-single-header.tar.gz" \
+              SHA256SUMS \
+              --clobber
+          else
+            gh release create "${TAG}" \
+              dist/cuDAO.cuh \
+              "cuDAO-${TAG}-single-header.tar.gz" \
+              SHA256SUMS \
+              --verify-tag \
+              --title "cuDAO ${TAG}" \
+              --generate-notes
+          fi
