@@ -1,0 +1,133 @@
+# Doxyfile for cuDAO
+#
+# Generate with:
+#   ./docs/generate_docs.sh
+#
+# Output:
+#   build/docs/html/index.html
+
+DOXYFILE_ENCODING      = UTF-8
+
+PROJECT_NAME           = "cuDAO"
+PROJECT_BRIEF          = "Dependency-Aware Ordering runtime for concurrent CUDA memory access"
+PROJECT_LOGO           = assets/cuDAO_LOGO.png
+
+OUTPUT_DIRECTORY       = build/docs
+CREATE_SUBDIRS         = NO
+ALLOW_UNICODE_NAMES    = NO
+OUTPUT_LANGUAGE        = English
+
+# Input
+INPUT                  = README.md \
+                         docs/mainpage.md \
+                         include
+
+USE_MDFILE_AS_MAINPAGE = docs/mainpage.md
+
+FILE_PATTERNS          = *.h \
+                         *.hpp \
+                         *.cuh \
+                         *.cu \
+                         *.md
+
+RECURSIVE              = YES
+EXCLUDE                = build \
+                         cmake-build-* \
+                         .git
+
+EXCLUDE_PATTERNS       = */build/* \
+                         */cmake-build-*/* \
+                         */.git/*
+
+# Make Doxygen parse CUDA headers/sources as C++.
+EXTENSION_MAPPING      = cuh=C++ \
+                         cu=C++
+
+# Extraction
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = NO
+EXTRACT_PRIV_VIRTUAL   = NO
+EXTRACT_PACKAGE        = NO
+EXTRACT_STATIC         = NO
+EXTRACT_LOCAL_CLASSES  = NO
+HIDE_UNDOC_MEMBERS     = NO
+HIDE_UNDOC_CLASSES     = NO
+SHOW_GROUPED_MEMB_INC  = YES
+
+# C++ / CUDA preprocessing
+ENABLE_PREPROCESSING   = YES
+MACRO_EXPANSION        = YES
+EXPAND_ONLY_PREDEF     = YES
+SKIP_FUNCTION_MACROS   = YES
+
+PREDEFINED             = __CUDACC__ \
+                         __host__= \
+                         __device__= \
+                         __global__= \
+                         __shared__= \
+                         __managed__= \
+                         __constant__= \
+                         __restrict__= \
+                         "__launch_bounds__(x)=" \
+                         "__launch_bounds__(x,y)="
+
+# Namespaces/classes
+HIDE_SCOPE_NAMES       = NO
+SHOW_INCLUDE_FILES     = YES
+INLINE_INFO            = YES
+SORT_MEMBER_DOCS       = YES
+SORT_BRIEF_DOCS        = YES
+SORT_MEMBERS_CTORS_1ST = YES
+
+# Warnings
+QUIET                  = NO
+WARNINGS               = YES
+WARN_IF_UNDOCUMENTED   = NO
+WARN_IF_DOC_ERROR      = YES
+WARN_NO_PARAMDOC       = NO
+WARN_AS_ERROR          = NO
+
+# Source browser
+SOURCE_BROWSER         = YES
+INLINE_SOURCES         = NO
+STRIP_CODE_COMMENTS    = NO
+REFERENCED_BY_RELATION = YES
+REFERENCES_RELATION    = YES
+
+# HTML output
+GENERATE_HTML          = YES
+HTML_OUTPUT            = html
+HTML_FILE_EXTENSION    = .html
+HTML_DYNAMIC_SECTIONS  = YES
+GENERATE_TREEVIEW      = YES
+DISABLE_INDEX          = NO
+FULL_SIDEBAR           = NO
+
+# Search
+SEARCHENGINE           = YES
+SERVER_BASED_SEARCH    = NO
+
+# LaTeX/man/XML outputs disabled for now.
+GENERATE_LATEX         = NO
+GENERATE_MAN           = NO
+GENERATE_XML           = NO
+GENERATE_RTF           = NO
+
+# Graphs
+HAVE_DOT               = YES
+DOT_IMAGE_FORMAT       = svg
+INTERACTIVE_SVG        = YES
+CALL_GRAPH             = NO
+CALLER_GRAPH           = NO
+CLASS_GRAPH            = YES
+COLLABORATION_GRAPH    = NO
+INCLUDE_GRAPH          = NO
+INCLUDED_BY_GRAPH      = NO
+DIRECTORY_GRAPH        = YES
+
+# Misc
+GENERATE_TIMESTAMP     = NO
+FULL_PATH_NAMES        = NO
+STRIP_FROM_PATH        = .
+MARKDOWN_SUPPORT       = YES
+AUTOLINK_SUPPORT       = YES

@@ -1,0 +1,249 @@
+name: Publish documentation
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing documentation tag, for example v0.1.0'
+        required: true
+        type: string
+
+concurrency:
+  group: cudao-docs-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  GPU_WORKFLOW_NAME: cuDAO GPU CI
+  DOCS_REPO: ${{ vars.DOCS_REPO }}
+  DOCS_BRANCH: ${{ vars.DOCS_BRANCH || 'main' }}
+
+jobs:
+  publish-docs:
+    name: Generate and publish documentation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          fetch-depth: 0
+
+      - name: Resolve documentation tag
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch --force --tags
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+
+          if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "Tag ${TAG} does not exist."
+            exit 1
+          fi
+
+          TAG_SHA="$(git rev-list -n 1 "${TAG}")"
+
+          echo "Resolved tag: ${TAG}"
+          echo "Resolved commit: ${TAG_SHA}"
+
+          echo "name=${TAG}" >> "${GITHUB_OUTPUT}"
+          echo "sha=${TAG_SHA}" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify tag is on main
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG_SHA="${{ steps.tag.outputs.sha }}"
+
+          git fetch origin main --force
+
+          if ! git merge-base --is-ancestor "${TAG_SHA}" origin/main; then
+            echo "Tag ${{ steps.tag.outputs.name }} does not point to a commit reachable from origin/main."
+            echo "Documentation tags must point to commits that have gone through the main-branch GPU CI."
+            exit 1
+          fi
+
+      - name: Verify GPU CI passed for this commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          TAG_SHA="${{ steps.tag.outputs.sha }}"
+
+          echo "Checking successful '${GPU_WORKFLOW_NAME}' run for commit ${TAG_SHA} on main..."
+
+          GPU_RUN_URL=""
+
+          for attempt in $(seq 1 30); do
+            GPU_RUN_URL="$(
+              gh run list \
+                --workflow "${GPU_WORKFLOW_NAME}" \
+                --commit "${TAG_SHA}" \
+                --branch main \
+                --event push \
+                --status success \
+                --limit 1 \
+                --json url \
+                --jq '.[0].url // empty'
+            )"
+
+            if [ -n "${GPU_RUN_URL}" ]; then
+              echo "Found successful GPU CI run: ${GPU_RUN_URL}"
+              exit 0
+            fi
+
+            echo "No successful GPU CI run found yet for ${TAG_SHA}. Attempt ${attempt}/30."
+            sleep 60
+          done
+
+          echo "No successful GPU CI run was found for commit ${TAG_SHA} on main."
+          echo "Recent GPU CI runs for this commit:"
+
+          gh run list \
+            --workflow "${GPU_WORKFLOW_NAME}" \
+            --commit "${TAG_SHA}" \
+            --limit 10 || true
+
+          exit 1
+
+      - name: Validate documentation deployment settings
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${DOCS_REPO}" ]; then
+            echo "DOCS_REPO repository variable is required, for example: Mgepahmge/cuDAO-docs"
+            exit 1
+          fi
+
+          if [ -z "${DOCS_BRANCH}" ]; then
+            echo "DOCS_BRANCH repository variable is required, for example: main"
+            exit 1
+          fi
+
+      - name: Install documentation dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y doxygen graphviz rsync
+
+      - name: Generate documentation
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          chmod +x docs/generate_docs.sh
+          ./docs/generate_docs.sh
+
+          test -s build/docs/html/index.html
+
+      - name: Configure SSH
+        shell: bash
+        env:
+          DOCS_DEPLOY_KEY: ${{ secrets.DOCS_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${DOCS_DEPLOY_KEY}" ]; then
+            echo "DOCS_DEPLOY_KEY secret is required."
+            exit 1
+          fi
+
+          mkdir -p "${HOME}/.ssh"
+
+          printf '%s\n' "${DOCS_DEPLOY_KEY}" > "${HOME}/.ssh/cudao_docs_deploy_key"
+          chmod 600 "${HOME}/.ssh/cudao_docs_deploy_key"
+
+          ssh-keyscan -t ed25519 github.com >> "${HOME}/.ssh/known_hosts"
+
+          cat > "${HOME}/.ssh/config" <<EOF
+          Host github.com
+            HostName github.com
+            User git
+            IdentityFile ${HOME}/.ssh/cudao_docs_deploy_key
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+          EOF
+
+          chmod 600 "${HOME}/.ssh/config"
+
+      - name: Clone documentation repository
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git clone --branch "${DOCS_BRANCH}" "git@github.com:${DOCS_REPO}.git" docs-site
+
+      - name: Update documentation repository
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="${{ steps.tag.outputs.name }}"
+
+          rm -rf "docs-site/${TAG}" "docs-site/latest"
+
+          mkdir -p "docs-site/${TAG}" "docs-site/latest"
+
+          rsync -a --delete build/docs/html/ "docs-site/${TAG}/"
+          rsync -a --delete build/docs/html/ "docs-site/latest/"
+
+          touch docs-site/.nojekyll
+
+          cat > docs-site/index.html <<EOF
+          <!doctype html>
+          <html lang="en">
+            <head>
+              <meta charset="utf-8">
+              <meta http-equiv="refresh" content="0; url=latest/">
+              <title>cuDAO Documentation</title>
+            </head>
+            <body>
+              <p>Redirecting to <a href="latest/">cuDAO documentation</a>.</p>
+            </body>
+          </html>
+          EOF
+
+      - name: Commit and push documentation
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="${{ steps.tag.outputs.name }}"
+          TAG_SHA="${{ steps.tag.outputs.sha }}"
+
+          cd docs-site
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add .
+
+          if git diff --cached --quiet; then
+            echo "Documentation is already up to date."
+            exit 0
+          fi
+
+          git commit -m "docs: publish cuDAO ${TAG} documentation" \
+            -m "Source commit: ${TAG_SHA}"
+
+          git push origin "${DOCS_BRANCH}"
