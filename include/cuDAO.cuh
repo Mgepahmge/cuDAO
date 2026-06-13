@@ -1278,6 +1278,14 @@ std::abort(); \
             // Free data
             CUDAO_ASSERT(cuMemFreeAsync(reinterpret_cast<CUdeviceptr>(ptr), stream));
 
+            // Reset slot device-side version before making the slot reusable.
+            CUDAO_ASSERT(cuStreamWriteValue64(
+                stream,
+                slot->getWriteVersionAddr(slotPool.deviceMem),
+                0,
+                CU_STREAM_WRITE_VALUE_DEFAULT
+            ));
+
             // Launch free callback
             CUDAO_ASSERT(cuLaunchHostFunc(stream, freeCallback, reinterpret_cast<void*>(freeData)));
         }
@@ -1920,6 +1928,14 @@ std::abort(); \
                 stream, reinterpret_cast<CUdeviceptr>(slot->getReadGateAddr(slotPool.pinnedMem)), 0,
                 CU_STREAM_WAIT_VALUE_EQ));
 
+            // Reset write version
+            CUDAO_ASSERT(cuStreamWriteValue64(
+                stream,
+                slot->getWriteVersionAddr(slotPool.deviceMem),
+                0,
+                CU_STREAM_WRITE_VALUE_DEFAULT
+            ));
+
             // Launch callback
             CUDAO_ASSERT(cuLaunchHostFunc(stream, unregisterCallback, reinterpret_cast<void*>(unregisterData)));
         }
@@ -1983,21 +1999,24 @@ std::abort(); \
                 {
                     uint8_t v;
                     std::memcpy(&v, task.paramBuffer.data(), 1);
-                    CUDAO_ASSERT(cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(task.writeArgs[0]), v, task.sharedMem, stream));
+                    CUDAO_ASSERT(
+                        cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(task.writeArgs[0]), v, task.sharedMem, stream));
                     break;
                 }
             case 2:
                 {
                     uint16_t v;
                     std::memcpy(&v, task.paramBuffer.data(), 2);
-                    CUDAO_ASSERT(cuMemsetD16Async(reinterpret_cast<CUdeviceptr>(task.writeArgs[0]), v, task.sharedMem, stream));
+                    CUDAO_ASSERT(
+                        cuMemsetD16Async(reinterpret_cast<CUdeviceptr>(task.writeArgs[0]), v, task.sharedMem, stream));
                     break;
                 }
             case 4:
                 {
                     uint32_t v;
                     std::memcpy(&v, task.paramBuffer.data(), 4);
-                    CUDAO_ASSERT(cuMemsetD32Async(reinterpret_cast<CUdeviceptr>(task.writeArgs[0]), v, task.sharedMem, stream));
+                    CUDAO_ASSERT(
+                        cuMemsetD32Async(reinterpret_cast<CUdeviceptr>(task.writeArgs[0]), v, task.sharedMem, stream));
                     break;
                 }
             default:
@@ -2009,7 +2028,7 @@ std::abort(); \
 
             // Update write version
             CUDAO_ASSERT(cuStreamWriteValue64(stream, slot->getWriteVersionAddr(slotPool.deviceMem),
-    slot->expectedWriteVersion, CU_STREAM_WRITE_VALUE_DEFAULT));
+                slot->expectedWriteVersion, CU_STREAM_WRITE_VALUE_DEFAULT));
 
             // Launch callback
 #ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
