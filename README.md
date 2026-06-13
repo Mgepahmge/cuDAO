@@ -20,17 +20,17 @@ cuDAO uses a dedicated scheduler thread that consumes kernel launch requests fro
 
 ### Compiler
 
-| Platform | Compiler | Minimum Version                       |
-|----------|----------|---------------------------------------|
+| Platform | Compiler | Minimum Version                      |
+| -------- | -------- | ------------------------------------ |
 | Windows  | MSVC     | Visual Studio 2017 15.8 (MSVC 19.15) |
-| Linux    | GCC      | GCC 9                                 |
+| Linux    | GCC      | GCC 9                                |
 
 Both must support C++17 (`/std:c++17` or `-std=c++17`).
 
 ### CUDA Toolkit
 
 | Requirement           | Minimum Version |
-|-----------------------|-----------------|
+| --------------------- | --------------- |
 | CUDA Toolkit          | 11.0            |
 | nvcc C++17 support    | CUDA 11.0+      |
 | `cuStreamWaitValue64` | CUDA 9.0+       |
@@ -41,24 +41,27 @@ Both must support C++17 (`/std:c++17` or `-std=c++17`).
 
 `cuStreamWaitValue64` and `cuStreamWriteValue64` require `CU_DEVICE_ATTRIBUTE_CAN_USE_STREAM_MEM_OPS`, which is guaranteed on Volta (sm_70) and all subsequent architectures.
 
-| Architecture | Example GPUs                     |
-|--------------|----------------------------------|
-| Volta        | Tesla V100, Titan V              |
-| Turing       | RTX 2060/2070/2080, Tesla T4     |
-| Ampere       | RTX 3070/3080/3090, A100         |
-| Ada          | RTX 4060/4070/4080/4090          |
-| Hopper       | H100                             |
+| Architecture | Example GPUs                 |
+| ------------ | ---------------------------- |
+| Volta        | Tesla V100, Titan V          |
+| Turing       | RTX 2060/2070/2080, Tesla T4 |
+| Ampere       | RTX 3070/3080/3090, A100     |
+| Ada          | RTX 4060/4070/4080/4090      |
+| Hopper       | H100                         |
 
 ### Operating System
 
 | Platform | Requirement                                                   |
-|----------|---------------------------------------------------------------|
+| -------- | ------------------------------------------------------------- |
 | Linux    | Kernel 2.6.22+ (futex, available on all modern distributions) |
 | Windows  | Windows 8 / Windows Server 2012 or newer (`WaitOnAddress`)    |
 
-### CMake
+### Build Tools
 
-CMake 3.25 or newer.
+| Tool     | Minimum Version | Notes                                       |
+| -------- | --------------- | ------------------------------------------- |
+| CMake    | 3.25            | Required for configuration and installation |
+| Python 3 | 3.x             | Required to generate the single-header file |
 
 ---
 
@@ -97,17 +100,38 @@ Installs headers and CMake package config, enabling use via `find_package(cuDAO)
 
 __global__ void addKernel(float* c, const float* a, const float* b, int n) { ... }
 
-// fire-and-forget
+// allocate tracked device memory
+float* a = nullptr;
+float* b = nullptr;
+float* c = nullptr;
+
+cuDAO::cuDAOMalloc(&a, sizeof(float) * n);
+cuDAO::cuDAOMalloc(&b, sizeof(float) * n);
+cuDAO::cuDAOMalloc(&c, sizeof(float) * n);
+
+// scheduler-managed memory operations
+cuDAO::cuDAOMemset(a, 0.0f, n);
+cuDAO::cuDAOMemset(b, 1.0f, n);
+
+// fire-and-forget kernel launch
 cuDAO::launchKernel(addKernel, grid, block, 0, write(c), read(a), read(b), n);
 
-// with synchronization handle
-cuDAO::CudaFuture f = cuDAO::launchKernelSync(addKernel, grid, block, 0,
-                                               write(c), read(a), read(b), n);
-f.wait();
+// wait until all previous operations on c are complete
+cuDAO::sync(c);
 
-// free tracked memory (fire-and-forget)
+// free tracked memory
+cuDAO::cuDAOfree(a);
+cuDAO::cuDAOfree(b);
 cuDAO::cuDAOfree(c);
 ```
+
+`cuDAOMemcpy` is also scheduler-managed:
+
+```cpp
+cuDAO::cuDAOMemcpy(dst, src, bytes, cuDAO::cuDAOMemcpyType::Auto);
+```
+
+In `Auto` mode, cuDAO detects host, device, and managed memory pointers through CUDA pointer attributes.
 
 ---
 
