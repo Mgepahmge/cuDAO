@@ -7,27 +7,51 @@ namespace cuDAO {
     // Kernel Parser
     // ──────────────────────────────────────────────────────────────────────────
 
+    /**
+     * @brief Explicit read-only access annotation for a pointer argument.
+     *
+     * ReadWrapper is normally constructed with read(ptr). It tells cuDAO that
+     * the submitted kernel reads from the pointer but does not write to it.
+     */
     template <typename T>
     struct ReadWrapper {
-        T* ptr;
+        T* ptr; ///< Pointer passed to the CUDA kernel as a read dependency.
 
         explicit ReadWrapper(T* p) noexcept : ptr(p) {
         }
     };
 
+    /**
+     * @brief Explicit write access annotation for a pointer argument.
+     *
+     * WriteWrapper is normally constructed with write(ptr). It tells cuDAO that
+     * the submitted kernel may write to the pointer.
+     */
     template <typename T>
     struct WriteWrapper {
-        T* ptr;
+        T* ptr; ///< Pointer passed to the CUDA kernel as a write dependency.
 
         explicit WriteWrapper(T* p) noexcept : ptr(p) {
         }
     };
 
+    /**
+     * @brief Mark a pointer argument as read-only for dependency tracking.
+     *
+     * @param ptr Pointer that will be read by the submitted kernel.
+     * @return A wrapper consumed by launchKernel() or launchKernelSync().
+     */
     template <typename T>
     ReadWrapper<T> read(T* ptr) noexcept {
         return ReadWrapper<T>{ptr};
     }
 
+    /**
+     * @brief Mark a pointer argument as written for dependency tracking.
+     *
+     * @param ptr Pointer that will be written by the submitted kernel.
+     * @return A wrapper consumed by launchKernel() or launchKernelSync().
+     */
     template <typename T>
     WriteWrapper<T> write(T* ptr) noexcept {
         return WriteWrapper<T>{ptr};

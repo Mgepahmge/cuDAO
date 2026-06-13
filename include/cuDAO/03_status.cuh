@@ -7,13 +7,25 @@ namespace cuDAO {
     // cuDAO Error
     // ──────────────────────────────────────────────────────────────────────────
 
+    /**
+     * @brief Small move-only string used inside cuDAOStatus.
+     *
+     * LazyString avoids throwing from error-message construction. If allocation
+     * fails, the string becomes empty rather than propagating an exception.
+     */
     class LazyString {
         char* data{nullptr};
         size_t size_{0};
 
     public:
+        /**
+         * @brief Construct an empty string.
+         */
         LazyString() noexcept = default;
 
+        /**
+         * @brief Copy text from a std::string without throwing.
+         */
         explicit LazyString(const std::string& s) noexcept {
             data = new(std::nothrow) char[s.size() + 1];
             if (data) {
@@ -22,6 +34,9 @@ namespace cuDAO {
             }
         }
 
+        /**
+         * @brief Copy text from a null-terminated string without throwing.
+         */
         explicit LazyString(const char* s) noexcept {
             if (!s) {
                 return;
@@ -35,6 +50,9 @@ namespace cuDAO {
 
         LazyString(const LazyString& s) = delete;
 
+        /**
+         * @brief Move-construct a LazyString.
+         */
         LazyString(LazyString&& s) noexcept : data(s.data), size_(s.size_) {
             s.data = nullptr;
             s.size_ = 0;
@@ -42,6 +60,9 @@ namespace cuDAO {
 
         LazyString& operator=(const LazyString& other) = delete;
 
+        /**
+         * @brief Move-assign a LazyString.
+         */
         LazyString& operator=(LazyString&& other) noexcept {
             if (this != &other) {
                 delete[] data;
@@ -53,21 +74,44 @@ namespace cuDAO {
             return *this;
         }
 
+        /**
+         * @brief Return the stored string length.
+         */
         [[nodiscard]] size_t size() const {
             return size_;
         }
 
+        /**
+         * @brief Return a null-terminated C string.
+         *
+         * @return Stored message text, or an empty string if no allocation was available.
+         */
         [[nodiscard]] const char* c_str() const {
             return data ? data : "";
         }
     };
 
+    /**
+     * @brief Status object returned by cuDAO public APIs.
+     *
+     * cuDAOStatus separates cuDAO-level errors from CUDA Driver API errors. If
+     * err is cuDAOError::CudaDriverError, cudaResult stores the original CUDA
+     * Driver API result. where identifies the cuDAO function that produced the
+     * status when available.
+     */
     struct cuDAOStatus {
-        cuDAOError err;
-        CUresult cudaResult;
-        const char* where;
-        LazyString msg;
+        cuDAOError err; ///< cuDAO-level result code.
+        CUresult cudaResult; ///< CUDA Driver API result associated with the error.
+        const char* where; ///< Function name that produced the status, when available.
+        LazyString msg; ///< Human-readable message for the cuDAO-level error.
 
+        /**
+         * @brief Construct a status from a cuDAO error code.
+         *
+         * @param err_ cuDAO-level error code.
+         * @param where_ Optional function name.
+         * @param cudaResult_ Optional CUDA Driver API result.
+         */
         explicit cuDAOStatus(const cuDAOError err_, const char* where_ = nullptr,
                              const CUresult cudaResult_ = CUDA_SUCCESS) noexcept : err(err_), cudaResult(cudaResult_),
             where(where_) {
@@ -102,17 +146,29 @@ namespace cuDAO {
             }
         }
 
+        /**
+         * @brief Construct a successful status.
+         */
         cuDAOStatus() : cuDAOStatus(cuDAOError::Success) {
         }
 
+        /**
+         * @brief Copy status metadata and reconstruct the message from the error code.
+         */
         cuDAOStatus(const cuDAOStatus& other) noexcept : cuDAOStatus(other.err, other.where, other.cudaResult) {
         }
 
+        /**
+         * @brief Move-construct a status object.
+         */
         cuDAOStatus(cuDAOStatus&& other) noexcept
             : err(other.err), cudaResult(other.cudaResult),
               where(other.where), msg(std::move(other.msg)) {
         }
 
+        /**
+         * @brief Move-assign a status object.
+         */
         cuDAOStatus& operator=(cuDAOStatus&& other) noexcept {
             if (this == &other) return *this;
             err = other.err;
