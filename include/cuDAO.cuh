@@ -5,4 +5,4 @@
  *
  * Single include header. Pull in this file to access the full public API.
  */
-#include "cuDAO/10_Scheduler.cuh"
+#include "cuDAO/11_public_api.cuh"
