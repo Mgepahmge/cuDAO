@@ -2203,7 +2203,8 @@ std::abort(); \
             std::shared_ptr<CudaPromise> promise;
             try {
                 promise = std::make_shared<CudaPromise>();
-            } catch (std::bad_alloc&) {
+            }
+            catch (std::bad_alloc&) {
                 return cuDAOStatus{cuDAOError::HostAllocationFailed, __func__};
             }
             task.promise = promise;
@@ -2334,21 +2335,46 @@ std::abort(); \
             break;
         case cuDAOMemcpyType::Auto:
             {
+                unsigned int dstIsManaged, srcIsManaged;
                 CUmemorytype dstType, srcType;
-                auto re = cuPointerGetAttribute(&dstType, CU_POINTER_ATTRIBUTE_MEMORY_TYPE,
+                auto re = cuPointerGetAttribute(&dstIsManaged, CU_POINTER_ATTRIBUTE_IS_MANAGED,
                                                 reinterpret_cast<CUdeviceptr>(dst));
                 if (re == CUDA_ERROR_INVALID_VALUE) {
                     dstType = CU_MEMORYTYPE_HOST;
                 }
-                else if (re != CUDA_SUCCESS) {
+                else if (re == CUDA_SUCCESS) {
+                    if (dstIsManaged) {
+                        dstType = CU_MEMORYTYPE_UNIFIED;
+                    }
+                    else {
+                        re = cuPointerGetAttribute(&dstType, CU_POINTER_ATTRIBUTE_MEMORY_TYPE,
+                                                   reinterpret_cast<CUdeviceptr>(dst));
+                        if (re != CUDA_SUCCESS) {
+                            return cuDAOStatus{cuDAOError::CudaDriverError, __func__, re};
+                        }
+                    }
+                }
+                else {
                     return cuDAOStatus{cuDAOError::CudaDriverError, __func__, re};
                 }
-                re = cuPointerGetAttribute(&srcType, CU_POINTER_ATTRIBUTE_MEMORY_TYPE,
+                re = cuPointerGetAttribute(&srcIsManaged, CU_POINTER_ATTRIBUTE_IS_MANAGED,
                                            reinterpret_cast<CUdeviceptr>(src));
                 if (re == CUDA_ERROR_INVALID_VALUE) {
                     srcType = CU_MEMORYTYPE_HOST;
                 }
-                else if (re != CUDA_SUCCESS) {
+                else if (re == CUDA_SUCCESS) {
+                    if (srcIsManaged) {
+                        srcType = CU_MEMORYTYPE_UNIFIED;
+                    }
+                    else {
+                        re = cuPointerGetAttribute(&srcType, CU_POINTER_ATTRIBUTE_MEMORY_TYPE,
+                                                   reinterpret_cast<CUdeviceptr>(src));
+                        if (re != CUDA_SUCCESS) {
+                            return cuDAOStatus{cuDAOError::CudaDriverError, __func__, re};
+                        }
+                    }
+                }
+                else {
                     return cuDAOStatus{cuDAOError::CudaDriverError, __func__, re};
                 }
                 if (!getMemcpyTaskType(dstType, srcType, task.taskType)) {
