@@ -109,6 +109,7 @@ std::abort(); \
         Alloc,
         Register,
         Unregister,
+        Memset,
         Invalid
     };
 
@@ -1923,6 +1924,99 @@ std::abort(); \
             CUDAO_ASSERT(cuLaunchHostFunc(stream, unregisterCallback, reinterpret_cast<void*>(unregisterData)));
         }
 
+        void processMemsetTask(TaskDescriptor& task) noexcept {
+            // Phase 1 : Reversible operations
+            // Allocate callback data
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+            auto* syncData = new(std::nothrow) SyncCallbackData{
+                task.promise.get()
+            };
+            if (!syncData) {
+                errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
+                return;
+            }
+#endif
+            // Register parameters
+            auto writeArg = task.writeArgs[0];
+            auto [it, inserted] = slotMap->try_emplace(writeArg, nullptr);
+            if (inserted) {
+                auto* slot = slotPool.alloc();
+                if (!slot) {
+                    slotMap->erase(it);
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+                    delete syncData;
+#endif
+                    errorQueue->push(cuDAOStatus{cuDAOError::SlotPoolExhausted, __func__});
+                    return;
+                }
+                it->second = slot;
+            }
+            auto slot = it->second;
+
+            // Phase 2 : Irreversible operations
+            // Get stream
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+            uint32_t streamId;
+            auto stream = streamPool.get(&streamId);
+#else
+            auto stream = streamPool.get();
+#endif
+
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+            syncData->streamId = streamId;
+            syncData->policy = &streamPool.policy;
+#endif
+
+            // Wait write version
+            CUDAO_ASSERT(cuStreamWaitValue64(stream, slot->getWriteVersionAddr(slotPool.deviceMem),
+                slot->expectedWriteVersion, CU_STREAM_WAIT_VALUE_GEQ));
+            ++slot->expectedWriteVersion;
+
+            // Wait read gate
+            CUDAO_ASSERT(cuStreamWaitValue64(
+                stream, reinterpret_cast<CUdeviceptr>(slot->getReadGateAddr(slotPool.pinnedMem)), 0,
+                CU_STREAM_WAIT_VALUE_EQ));
+
+            // Memset
+            switch (task.paramSizes[0]) {
+            case 1:
+                {
+                    uint8_t v;
+                    std::memcpy(&v, task.paramBuffer.data(), 1);
+                    CUDAO_ASSERT(cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(task.writeArgs[0]), v, task.sharedMem, stream));
+                    break;
+                }
+            case 2:
+                {
+                    uint16_t v;
+                    std::memcpy(&v, task.paramBuffer.data(), 2);
+                    CUDAO_ASSERT(cuMemsetD16Async(reinterpret_cast<CUdeviceptr>(task.writeArgs[0]), v, task.sharedMem, stream));
+                    break;
+                }
+            case 4:
+                {
+                    uint32_t v;
+                    std::memcpy(&v, task.paramBuffer.data(), 4);
+                    CUDAO_ASSERT(cuMemsetD32Async(reinterpret_cast<CUdeviceptr>(task.writeArgs[0]), v, task.sharedMem, stream));
+                    break;
+                }
+            default:
+                {
+                    // Should never be reached
+                    break;
+                }
+            }
+
+            // Update write version
+            CUDAO_ASSERT(cuStreamWriteValue64(stream, slot->getWriteVersionAddr(slotPool.deviceMem),
+    slot->expectedWriteVersion, CU_STREAM_WRITE_VALUE_DEFAULT));
+
+            // Launch callback
+#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
+            CUDAO_ASSERT(cuLaunchHostFunc(stream, syncCallback, reinterpret_cast<void*>(syncData)));
+#endif
+        }
+
         void processTask(TaskDescriptor& task) noexcept {
             switch (task.taskType) {
             case TaskType::Kernel:
@@ -1960,6 +2054,9 @@ std::abort(); \
                 break;
             case TaskType::Unregister:
                 processUnregisterTask(task);
+                break;
+            case TaskType::Memset:
+                processMemsetTask(task);
                 break;
             default:
                 // Should never be reached
@@ -2453,6 +2550,26 @@ std::abort(); \
         }
         scheduler.submitTask(std::move(task));
         future.wait();
+        return cuDAOStatus{cuDAOError::Success};
+    }
+
+    template <typename T, typename U>
+    cuDAOStatus cuDAOMemset(T* ptr, const U val, const size_t count) noexcept {
+        static_assert(sizeof(U) == 1 || sizeof(U) == 2 || sizeof(U) == 4,
+                      "cuDAOMemset only supports 1/2/4-byte types");
+        TaskDescriptor task;
+        task.taskType = TaskType::Memset;
+        task.writeArgs[0] = reinterpret_cast<void*>(ptr);
+        task.writeArgsCount = 1;
+        task.sharedMem = count;
+        std::memcpy(task.paramBuffer.data(), &val, sizeof(U));
+        task.paramSizes[0] = sizeof(U);
+        task.paramCount = 1;
+        auto& scheduler = getDefaultScheduler();
+        if (scheduler.initStatus.err != cuDAOError::Success) {
+            return cuDAOStatus{scheduler.initStatus};
+        }
+        scheduler.submitTask(std::move(task));
         return cuDAOStatus{cuDAOError::Success};
     }
 }
