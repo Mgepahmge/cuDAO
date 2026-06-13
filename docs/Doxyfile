@@ -10,7 +10,7 @@ DOXYFILE_ENCODING      = UTF-8
 
 PROJECT_NAME           = "cuDAO"
 PROJECT_BRIEF          = "Dependency-Aware Ordering runtime for concurrent CUDA memory access"
-PROJECT_LOGO           = assets/cuDAO_LOGO.png
+PROJECT_LOGO           = 
 
 OUTPUT_DIRECTORY       = build/docs
 CREATE_SUBDIRS         = NO
