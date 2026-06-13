@@ -20,6 +20,8 @@ fi
 cd "${ROOT_DIR}"
 
 rm -rf "${OUTPUT_DIR}"
+mkdir -p "${OUTPUT_DIR}"
+
 doxygen "${DOXYFILE}"
 
 if [ ! -f "${HTML_INDEX}" ]; then
