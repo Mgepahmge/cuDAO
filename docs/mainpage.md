@@ -115,3 +115,14 @@ The generated HTML entry point is:
 ```text
 build/docs/html/index.html
 ```
+
+---
+
+## Design documentation
+
+The Doxygen site also contains design-level documentation for maintainers:
+
+- @ref design_overview
+- @ref dependency_model
+- @ref memory_model
+
