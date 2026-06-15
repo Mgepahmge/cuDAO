@@ -2,11 +2,7 @@ function(cudao_add_example name)
     add_executable(${name} ${ARGN})
 
 target_link_libraries(${name} PRIVATE
-cuDAO::single
-)
-
-add_dependencies(${name}
-cudao_single_header
+cuDAO::cuDAO
 )
 
 set_target_properties(${name} PROPERTIES
