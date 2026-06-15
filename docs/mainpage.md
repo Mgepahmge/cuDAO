@@ -126,3 +126,13 @@ The Doxygen site also contains design-level documentation for maintainers:
 - @ref dependency_model
 - @ref memory_model
 
+---
+
+## Maintainer documentation
+
+Build, release, and contribution process documentation is also available:
+
+- @ref build_and_install
+- @ref release_process
+- @ref contributing
+
