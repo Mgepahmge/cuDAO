@@ -1268,13 +1268,25 @@ namespace cuDAO {
         void processMemsetTask(TaskDescriptor& task) noexcept {
             // Phase 1 : Reversible operations
             // Allocate callback data
+            SyncCallbackData* syncData = nullptr;
 #ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
-            auto* syncData = new(std::nothrow) SyncCallbackData{
+            syncData = new(std::nothrow) SyncCallbackData{
                 task.promise.get()
             };
             if (!syncData) {
                 errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
                 return;
+            }
+#endif
+#ifndef CUDA_DAO_USE_LEAST_TASK_POLICY
+            if (task.promise) {
+                syncData = new(std::nothrow) SyncCallbackData{
+                    task.promise.get()
+                };
+                if (!syncData) {
+                    errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
+                    return;
+                }
             }
 #endif
             // Register parameters
@@ -1284,9 +1296,9 @@ namespace cuDAO {
                 auto* slot = slotPool.alloc();
                 if (!slot) {
                     slotMap->erase(it);
-#ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
-                    delete syncData;
-#endif
+                    if (syncData) {
+                        delete syncData;
+                    }
                     errorQueue->push(cuDAOStatus{cuDAOError::SlotPoolExhausted, __func__});
                     return;
                 }
@@ -1358,6 +1370,11 @@ namespace cuDAO {
             // Launch callback
 #ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
             CUDAO_ASSERT(cuLaunchHostFunc(stream, syncCallback, reinterpret_cast<void*>(syncData)));
+#endif
+#ifndef CUDA_DAO_USE_LEAST_TASK_POLICY
+            if (task.promise && syncData) {
+                CUDAO_ASSERT(cuLaunchHostFunc(stream, syncCallback, reinterpret_cast<void*>(syncData)));
+            }
 #endif
         }
 

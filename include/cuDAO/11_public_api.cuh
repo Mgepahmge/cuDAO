@@ -590,4 +590,32 @@ namespace cuDAO {
         scheduler.submitTask(std::move(task));
         return cuDAOStatus{cuDAOError::Success};
     }
+
+    template <typename T, typename U>
+    std::variant<CudaFuture, cuDAOStatus> cuDAOMemsetSync(T* ptr, const U val, const size_t count) noexcept {
+        static_assert(sizeof(U) == 1 || sizeof(U) == 2 || sizeof(U) == 4,
+                      "cuDAOMemset only supports 1/2/4-byte types");
+        TaskDescriptor task;
+        task.taskType = TaskType::Memset;
+        task.writeArgs[0] = reinterpret_cast<void*>(ptr);
+        task.writeArgsCount = 1;
+        task.sharedMem = count;
+        std::memcpy(task.paramBuffer.data(), &val, sizeof(U));
+        task.paramSizes[0] = sizeof(U);
+        task.paramCount = 1;
+        std::shared_ptr<CudaPromise> promise;
+        try {
+            promise = std::make_shared<CudaPromise>();
+            task.promise = promise;
+        }
+        catch (const std::bad_alloc&) {
+            return cuDAOStatus{cuDAOError::InternalError, __func__};
+        }
+        auto& scheduler = getDefaultScheduler();
+        if (scheduler.initStatus.err != cuDAOError::Success) {
+            return cuDAOStatus{scheduler.initStatus};
+        }
+        scheduler.submitTask(std::move(task));
+        return CudaFuture{promise};
+    }
 }
