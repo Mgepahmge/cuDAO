@@ -7,17 +7,43 @@ namespace cuDAO {
     // Stream Pool
     // ──────────────────────────────────────────────────────────────────────────
 
+    /**
+     * @brief Round-robin CUDA stream selection policy.
+     *
+     * This policy ignores current stream load and cycles through stream indices.
+     * Correctness does not depend on the policy; dependency ordering is enforced by
+     * version-slot waits and writes.
+     */
     struct RoundRobinPolicy {
         uint32_t counter = 0;
 
+        /**
+         * @brief Select the next stream index.
+         *
+         * @param streamCount Number of streams in the pool. Must be a power of two for
+         *                    the current bit-mask implementation.
+         * @return Selected stream index.
+         */
         uint32_t select(const uint32_t streamCount) noexcept {
             return counter++ & (streamCount - 1);
         }
     };
 
+    /**
+     * @brief Stream selection policy that chooses the least-loaded stream.
+     *
+     * The policy keeps an approximate outstanding task count per stream. Selection
+     * increments the chosen counter. Completion callbacks decrement it.
+     */
     struct LeastTaskPolicy {
         std::array<std::atomic<uint32_t>, constants::STREAM_COUNT> taskCount{};
 
+        /**
+         * @brief Select the stream with the smallest outstanding task count.
+         *
+         * @param streamCount Number of streams in the pool.
+         * @return Selected stream index.
+         */
         uint32_t select(uint32_t streamCount) noexcept {
             uint32_t minIdx = 0;
             for (uint32_t i = 1; i < streamCount; ++i) {
@@ -29,16 +55,32 @@ namespace cuDAO {
             return minIdx;
         }
 
+        /**
+         * @brief Mark one previously selected stream task as complete.
+         *
+         * @param streamIdx Stream index returned by select().
+         */
         void complete(uint32_t streamIdx) noexcept {
             taskCount[streamIdx].fetch_sub(1, std::memory_order_relaxed);
         }
     };
 
+    /**
+     * @brief Fixed-size pool of non-blocking CUDA streams.
+     *
+     * @tparam Policy Stream selection policy type, usually RoundRobinPolicy or
+     *                LeastTaskPolicy.
+     */
     template <typename Policy = RoundRobinPolicy>
     struct StreamPool {
         std::array<CUstream, constants::STREAM_COUNT> streams{};
         Policy policy;
 
+        /**
+         * @brief Create all CUDA streams in the pool.
+         *
+         * @return CUDA_SUCCESS on success, otherwise the first CUDA Driver API error.
+         */
         CUresult init() noexcept {
             for (uint32_t i = 0; i < constants::STREAM_COUNT; ++i) {
                 CUresult res = cuStreamCreate(&streams[i], CU_STREAM_NON_BLOCKING);
@@ -51,17 +93,32 @@ namespace cuDAO {
             return CUDA_SUCCESS;
         }
 
+        /**
+         * @brief Destroy all CUDA streams in the pool.
+         */
         void destroy() noexcept {
             for (auto& stream : streams)
                 cuStreamDestroy(stream);
         }
 
+        /**
+         * @brief Select and return a CUDA stream.
+         *
+         * @param outIdx Optional output receiving the selected stream index.
+         * @return Selected CUDA stream handle.
+         */
         CUstream get(uint32_t* outIdx = nullptr) noexcept {
             uint32_t idx = policy.select(constants::STREAM_COUNT);
             if (outIdx) *outIdx = idx;
             return streams[idx];
         }
 
+        /**
+         * @brief Synchronize every stream in the pool.
+         *
+         * @return Success if all streams synchronized, otherwise a status containing
+         *         the failed stream indices and CUDA error strings.
+         */
         cuDAOStatus synchronizeAll() noexcept {
             std::unique_ptr<std::vector<std::pair<uint32_t, CUresult>>> status(nullptr);
             for (uint32_t i = 0; i < constants::STREAM_COUNT; ++i) {

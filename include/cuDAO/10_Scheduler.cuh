@@ -7,6 +7,16 @@ namespace cuDAO {
     // Scheduler
     // ──────────────────────────────────────────────────────────────────────────
 
+    /**
+     * @brief Dedicated scheduler that converts cuDAO task descriptors into ordered CUDA stream work.
+     *
+     * Scheduler owns the CUDA streams, version slots, pointer slot map access,
+     * scheduler thread, and CUDA function cache. Public APIs submit TaskDescriptor
+     * objects to the global task queue; the scheduler thread pops and executes them.
+     *
+     * @tparam Policy Stream selection policy, usually RoundRobinPolicy or
+     *                      LeastTaskPolicy.
+     */
     template <typename Policy = RoundRobinPolicy>
     class Scheduler {
         using TaskQueueT = MPSCQueue<TaskDescriptor, constants::QUEUE_CAPACITY>;
@@ -30,6 +40,11 @@ namespace cuDAO {
 
         std::atomic<bool> idle{false};
 
+        /**
+         * @brief Retain and set the CUDA primary context for the scheduler device.
+         *
+         * @return Success on context setup, otherwise a CUDA driver error status.
+         */
         cuDAOStatus initCudaContext() const noexcept {
             CUcontext ctx;
             auto re = cuDevicePrimaryCtxRetain(&ctx, device);
@@ -43,6 +58,11 @@ namespace cuDAO {
             return cuDAOStatus{cuDAOError::Success};
         }
 
+        /**
+         * @brief Initialize streams, version-slot backing memory, queues, and maps.
+         *
+         * @return Success if all scheduler resources were initialized.
+         */
         cuDAOStatus initResource() noexcept {
             auto re = streamPool.init();
             if (re != CUDA_SUCCESS) {
@@ -66,15 +86,28 @@ namespace cuDAO {
             return cuDAOStatus{cuDAOError::Success};
         }
 
+        /**
+         * @brief Release the CUDA primary context retained by initCudaContext().
+         */
         void destroyCudaContext() const noexcept {
             cuDevicePrimaryCtxRelease(device);
         }
 
+        /**
+         * @brief Destroy scheduler-owned runtime resources.
+         */
         void destroyResource() noexcept {
             streamPool.destroy();
             slotPool.destroy();
         }
 
+        /**
+         * @brief Resolve and cache a CUDA kernel function symbol.
+         *
+         * @param funcPtr Host-side CUDA kernel symbol pointer.
+         * @param kernel Output CUDA Driver API function handle.
+         * @return true if the function was resolved or found in the cache.
+         */
         bool getCudaFunction(void* funcPtr, CUfunction& kernel) noexcept {
             if (const auto it = funcCache.find(funcPtr); it != funcCache.end()) {
                 kernel = it->second;
@@ -90,12 +123,18 @@ namespace cuDAO {
             return true;
         }
 
+        /**
+         * @brief Callback data used to mark read dependencies active before a task begins reading.
+         */
         struct ReadCallbackData {
             std::array<VersionSlot*, constants::MAX_PARAM_COUNT>* readSlots;
             size_t readArgsCount;
             VersionSlotPool* slotPool;
         };
 
+        /**
+         * @brief Callback data used to release read dependencies and fulfill completion state.
+         */
         struct CompletionCallbackData {
             std::array<VersionSlot*, constants::MAX_PARAM_COUNT> readSlots;
             size_t readArgsCount;
@@ -107,6 +146,9 @@ namespace cuDAO {
 #endif
         };
 
+        /**
+         * @brief Callback data for pointer-specific sync tasks.
+         */
         struct SyncCallbackData {
             CudaPromise* promise;
 #ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
@@ -115,6 +157,9 @@ namespace cuDAO {
 #endif
         };
 
+        /**
+         * @brief Callback data for scheduler-managed device free tasks.
+         */
         struct FreeCallbackData {
             VersionSlotPool* slotPool;
             void* ptr;
@@ -124,6 +169,9 @@ namespace cuDAO {
 #endif
         };
 
+        /**
+         * @brief Callback data for unregistering a pointer and optionally fulfilling a promise.
+         */
         struct UnregisterCallbackData {
             VersionSlotPool* slotPool;
             void* ptr;
@@ -134,6 +182,12 @@ namespace cuDAO {
 #endif
         };
 
+        /**
+         * @brief Stream callback that marks read slots as active.
+         *
+         * Increments each read slot's pending-read count and sets its read gate to one.
+         * The callback is ordered before the CUDA operation that consumes the reads.
+         */
         static void readStartCallback(void* data) noexcept {
             auto* data_ = reinterpret_cast<ReadCallbackData*>(data);
             auto* slotPool_ = data_->slotPool;
@@ -148,6 +202,12 @@ namespace cuDAO {
             delete data_;
         }
 
+        /**
+         * @brief Stream callback that fulfills a synchronization promise.
+         *
+         * Under the least-task policy, this callback also marks the selected stream task
+         * as complete.
+         */
         static void syncCallback(void* data) noexcept {
             auto* data_ = reinterpret_cast<SyncCallbackData*>(data);
             auto* promise = data_->promise;
@@ -162,6 +222,12 @@ namespace cuDAO {
             delete data_;
         }
 
+        /**
+         * @brief Stream callback that unregisters a pointer after asynchronous free.
+         *
+         * The associated slot is returned to the pool only after the stream reaches this
+         * callback.
+         */
         static void freeCallback(void* data) noexcept {
             auto* data_ = reinterpret_cast<FreeCallbackData*>(data);
             auto* ptr = data_->ptr;
@@ -175,6 +241,9 @@ namespace cuDAO {
             delete data_;
         }
 
+        /**
+         * @brief Stream callback that unregisters a pointer and fulfills the unregister promise.
+         */
         static void unregisterCallback(void* data) noexcept {
             auto* data_ = reinterpret_cast<UnregisterCallbackData*>(data);
             auto* ptr = data_->ptr;
@@ -190,6 +259,12 @@ namespace cuDAO {
             delete data_;
         }
 
+        /**
+         * @brief Stream callback that releases read gates and fulfills task completion state.
+         *
+         * Each read slot's pending-read count is decremented. If the count reaches zero,
+         * the read gate is reset to zero so waiting writers may proceed.
+         */
         static void completionCallBack(void* data) noexcept {
             auto* data_ = reinterpret_cast<CompletionCallbackData*>(data);
             auto* slotPool_ = data_->slotPool;
@@ -214,6 +289,13 @@ namespace cuDAO {
             delete data_;
         }
 
+        /**
+         * @brief Process a scheduler-managed kernel launch task.
+         *
+         * Registers read/write pointers, emits dependency waits, launches a read-start
+         * callback, launches the CUDA kernel, publishes new write versions, and then
+         * launches a completion callback.
+         */
         void processKernelTask(TaskDescriptor& task) noexcept {
             // Phase 1 : Reversible operations
             // Allocate callback data
@@ -342,6 +424,13 @@ namespace cuDAO {
             CUDAO_ASSERT(cuLaunchHostFunc(stream, completionCallBack, completionData));
         }
 
+        /**
+         * @brief Process a pointer-specific synchronization task.
+         *
+         * Waits for the pointer's current write version and fulfills the task promise
+         * from a stream-ordered callback. If the pointer has not been tracked yet, a
+         * slot is allocated lazily and the promise is fulfilled immediately.
+         */
         void processSyncTask(TaskDescriptor& task) noexcept {
             auto ptr = task.writeArgs[0];
             auto it = slotMap->find(ptr);
@@ -390,6 +479,12 @@ namespace cuDAO {
             CUDAO_ASSERT(cuLaunchHostFunc(stream, syncCallback, reinterpret_cast<void*>(syncData)));
         }
 
+        /**
+         * @brief Process a scheduler-managed device free task.
+         *
+         * Waits for prior writes and active reads, submits cuMemFreeAsync, resets the
+         * device-side slot version, and unregisters the pointer in a stream callback.
+         */
         void processFreeTask(TaskDescriptor& task) noexcept {
             auto ptr = task.writeArgs[0];
             auto it = slotMap->find(ptr);
@@ -460,6 +555,12 @@ namespace cuDAO {
             CUDAO_ASSERT(cuLaunchHostFunc(stream, freeCallback, reinterpret_cast<void*>(freeData)));
         }
 
+        /**
+         * @brief Process a device-to-device copy task.
+         *
+         * The source is treated as a read dependency and the destination as a write
+         * dependency.
+         */
         void processMemcpyDtoDTask(TaskDescriptor& task) noexcept {
             // Phase 1 : Reversible operations
             // Allocate callback data
@@ -574,6 +675,12 @@ namespace cuDAO {
             CUDAO_ASSERT(cuLaunchHostFunc(stream, completionCallBack, completionData));
         }
 
+        /**
+         * @brief Process a host-to-device copy task.
+         *
+         * The device destination is treated as a write dependency. The host source is
+         * not tracked as a scheduler slot.
+         */
         void processMemcpyHtoDTask(TaskDescriptor& task) noexcept {
             // Phase 1 : Reversible operations
             // Allocate callback data
@@ -651,6 +758,13 @@ namespace cuDAO {
             CUDAO_ASSERT(cuLaunchHostFunc(stream, syncCallback, reinterpret_cast<void*>(syncData)));
         }
 
+        /**
+         * @brief Process a device-to-host copy task.
+         *
+         * The device source is treated as a read dependency. The host destination is not
+         * tracked as a scheduler slot; host completion should be observed with
+         * cuDAOMemcpySync().
+         */
         void processMemcpyDtoHTask(TaskDescriptor& task) noexcept {
             // Phase 1 : Reversible operations
             // Allocate callback data
@@ -725,6 +839,12 @@ namespace cuDAO {
             CUDAO_ASSERT(cuLaunchHostFunc(stream, completionCallBack, completionData));
         }
 
+        /**
+         * @brief Process a copy task where unified memory participates on both sides.
+         *
+         * The source is treated as a read dependency and the destination as a write
+         * dependency.
+         */
         void processMemcpyUtoUTask(TaskDescriptor& task) noexcept {
             // Phase 1 : Reversible operations
             // Allocate callback data
@@ -839,6 +959,12 @@ namespace cuDAO {
             CUDAO_ASSERT(cuLaunchHostFunc(stream, completionCallBack, completionData));
         }
 
+        /**
+         * @brief Process a host-to-unified-memory copy task.
+         *
+         * The unified destination is treated as a write dependency. The host source is
+         * not tracked as a scheduler slot.
+         */
         void processMemcpyHtoUTask(TaskDescriptor& task) noexcept {
             // Phase 1 : Reversible operations
             // Allocate callback data
@@ -916,6 +1042,12 @@ namespace cuDAO {
             CUDAO_ASSERT(cuLaunchHostFunc(stream, syncCallback, reinterpret_cast<void*>(syncData)));
         }
 
+        /**
+         * @brief Process a unified-memory-to-host copy task.
+         *
+         * The unified source is treated as a read dependency. The host destination is
+         * not tracked as a scheduler slot.
+         */
         void processMemcpyUtoHTask(TaskDescriptor& task) noexcept {
             // Phase 1 : Reversible operations
             // Allocate callback data
@@ -990,6 +1122,11 @@ namespace cuDAO {
             CUDAO_ASSERT(cuLaunchHostFunc(stream, completionCallBack, completionData));
         }
 
+        /**
+         * @brief Register a pointer with the scheduler without submitting CUDA work.
+         *
+         * Used by cuDAOMalloc() after a CUDA allocation has produced a pointer.
+         */
         void processRegisterTask(TaskDescriptor& task) noexcept {
             // Register parameters
             auto readArg = task.readArgs[0];
@@ -1005,6 +1142,12 @@ namespace cuDAO {
             }
         }
 
+        /**
+         * @brief Process a scheduler-managed asynchronous device allocation task.
+         *
+         * Submits cuMemAllocAsync, signals when the virtual address is available,
+         * registers the resulting pointer, and publishes the initial write version.
+         */
         void processAllocTask(TaskDescriptor& task) noexcept {
             // Phase 1
 #ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
@@ -1055,6 +1198,12 @@ namespace cuDAO {
                 ptrSlot->expectedWriteVersion, CU_STREAM_WRITE_VALUE_DEFAULT));
         }
 
+        /**
+         * @brief Unregister a pointer after all prior work on it is complete.
+         *
+         * Waits for the current write version and read gate, resets the device-side
+         * write version, then removes the pointer-to-slot mapping in a stream callback.
+         */
         void processUnregisterTask(TaskDescriptor& task) noexcept {
             auto ptr = task.writeArgs[0];
             auto it = slotMap->find(ptr);
@@ -1110,6 +1259,12 @@ namespace cuDAO {
             CUDAO_ASSERT(cuLaunchHostFunc(stream, unregisterCallback, reinterpret_cast<void*>(unregisterData)));
         }
 
+        /**
+         * @brief Process a scheduler-managed memset task.
+         *
+         * Memset is modeled as a write dependency. The selected CUDA Driver API memset
+         * primitive depends on the value width stored in the task descriptor.
+         */
         void processMemsetTask(TaskDescriptor& task) noexcept {
             // Phase 1 : Reversible operations
             // Allocate callback data
@@ -1206,6 +1361,9 @@ namespace cuDAO {
 #endif
         }
 
+        /**
+         * @brief Dispatch one task descriptor to the matching task-type handler.
+         */
         void processTask(TaskDescriptor& task) noexcept {
             switch (task.taskType) {
             case TaskType::Kernel:
@@ -1253,6 +1411,13 @@ namespace cuDAO {
             }
         }
 
+        /**
+         * @brief Main scheduler thread loop.
+         *
+         * Initializes resources, consumes tasks until stop is requested, performs a
+         * short spin before sleeping, and wakes through the platform wake flag when new
+         * tasks are submitted.
+         */
         void run() {
             auto re = initCudaContext();
             if (re.err != cuDAOError::Success) {
@@ -1306,12 +1471,20 @@ namespace cuDAO {
     public:
         cuDAOStatus initStatus{cuDAOError::Success};
 
+        /**
+         * @brief Start the scheduler thread for a CUDA device.
+         *
+         * @param device_ CUDA device ordinal used by the scheduler.
+         */
         explicit Scheduler(const CUdevice device_) : device(device_) {
             thread = std::thread(&Scheduler::run, this);
             while (!initialized.load(std::memory_order_acquire)) {
             }
         }
 
+        /**
+         * @brief Stop the scheduler thread and release resources.
+         */
         ~Scheduler() {
             stopped.store(true);
             platformNotify(wakeFlag);
@@ -1320,6 +1493,11 @@ namespace cuDAO {
             }
         }
 
+        /**
+         * @brief Submit a task descriptor and wake the scheduler thread.
+         *
+         * @param task Task descriptor to move into the global task queue.
+         */
         void submitTask(TaskDescriptor&& task) noexcept {
             taskQueue->push(std::move(task));
             platformNotify(wakeFlag);
@@ -1332,6 +1510,9 @@ namespace cuDAO {
     using DefaultScheduler = Scheduler<RoundRobinPolicy>;
 #endif
 
+    /**
+     * @brief Return the process-local default scheduler singleton.
+     */
     inline DefaultScheduler& getDefaultScheduler() {
         static DefaultScheduler scheduler(0);
         return scheduler;
