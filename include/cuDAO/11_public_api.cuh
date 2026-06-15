@@ -591,6 +591,20 @@ namespace cuDAO {
         return cuDAOStatus{cuDAOError::Success};
     }
 
+    /**
+    * @ingroup public_api
+    * @brief Submit a scheduler-managed memset operation and return a completion future.
+    *
+    * U must be 1, 2, or 4 bytes wide. count is the number of elements of width
+    * sizeof(U), matching CUDA Driver memset D8/D16/D32 semantics.
+    *
+    * @tparam T Destination pointer pointee type.
+    * @tparam U Value type; must be 1, 2, or 4 bytes.
+    * @param ptr Destination pointer.
+    * @param val Value to write.
+    * @param count Number of elements to write.
+    * @return CudaFuture if the task was accepted, or cuDAOStatus on immediate submission failure.
+      */
     template <typename T, typename U>
     std::variant<CudaFuture, cuDAOStatus> cuDAOMemsetSync(T* ptr, const U val, const size_t count) noexcept {
         static_assert(sizeof(U) == 1 || sizeof(U) == 2 || sizeof(U) == 4,
