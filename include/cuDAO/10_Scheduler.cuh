@@ -302,6 +302,9 @@ namespace cuDAO {
             auto* completionData = new(std::nothrow) CompletionCallbackData;
             if (!completionData) {
                 errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
+                if (task.promise) {
+                    task.promise->set();
+                }
                 return;
             }
             completionData->readArgsCount = task.readArgsCount;
@@ -315,6 +318,9 @@ namespace cuDAO {
             if (!readData) {
                 errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
                 delete completionData;
+                if (task.promise) {
+                    task.promise->set();
+                }
                 return;
             }
 
@@ -329,6 +335,9 @@ namespace cuDAO {
                         delete readData;
                         delete completionData;
                         errorQueue->push(cuDAOStatus{cuDAOError::SlotPoolExhausted, __func__});
+                        if (task.promise) {
+                            task.promise->set();
+                        }
                         return;
                     }
                     it->second = slot;
@@ -346,6 +355,9 @@ namespace cuDAO {
                         delete readData;
                         delete completionData;
                         errorQueue->push(cuDAOStatus{cuDAOError::SlotPoolExhausted, __func__});
+                        if (task.promise) {
+                            task.promise->set();
+                        }
                         return;
                     }
                     it->second = slot;
@@ -360,6 +372,9 @@ namespace cuDAO {
                 delete readData;
                 delete completionData;
                 errorQueue->push(cuDAOStatus{cuDAOError::InvalidDeviceFunctionSymbol, __func__});
+                if (task.promise) {
+                    task.promise->set();
+                }
                 return;
             }
 
@@ -440,6 +455,9 @@ namespace cuDAO {
                 auto* slot = slotPool.alloc();
                 if (!slot) {
                     errorQueue->push(cuDAOStatus{cuDAOError::SlotPoolExhausted, __func__});
+                    if (task.promise) {
+                        task.promise->set();
+                    }
                     return;
                 }
                 slotMap->emplace(ptr, slot);
@@ -454,6 +472,9 @@ namespace cuDAO {
             };
             if (!syncData) {
                 errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
+                if (task.promise) {
+                    task.promise->set();
+                }
                 return;
             }
 
@@ -503,6 +524,9 @@ namespace cuDAO {
 #ifdef CUDA_DAO_USE_LEAST_TASK_POLICY
                 streamPool.policy.complete(streamId);
 #endif
+                if (task.promise) {
+                    task.promise->set();
+                }
                 return;
             }
 
@@ -516,6 +540,9 @@ namespace cuDAO {
             };
             if (!freeData) {
                 errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
+                if (task.promise) {
+                    task.promise->set();
+                }
                 return;
             }
 
@@ -567,6 +594,9 @@ namespace cuDAO {
             auto* completionData = new(std::nothrow) CompletionCallbackData;
             if (!completionData) {
                 errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
+                if (task.promise) {
+                    task.promise->set();
+                }
                 return;
             }
             completionData->readArgsCount = task.readArgsCount;
@@ -580,6 +610,9 @@ namespace cuDAO {
             if (!readData) {
                 errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
                 delete completionData;
+                if (task.promise) {
+                    task.promise->set();
+                }
                 return;
             }
 
@@ -594,6 +627,9 @@ namespace cuDAO {
                         delete readData;
                         delete completionData;
                         errorQueue->push(cuDAOStatus{cuDAOError::SlotPoolExhausted, __func__});
+                        if (task.promise) {
+                            task.promise->set();
+                        }
                         return;
                     }
                     it->second = slot;
@@ -611,6 +647,9 @@ namespace cuDAO {
                         delete readData;
                         delete completionData;
                         errorQueue->push(cuDAOStatus{cuDAOError::SlotPoolExhausted, __func__});
+                        if (task.promise) {
+                            task.promise->set();
+                        }
                         return;
                     }
                     it->second = slot;
@@ -689,6 +728,9 @@ namespace cuDAO {
             };
             if (!syncData) {
                 errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
+                if (task.promise) {
+                    task.promise->set();
+                }
                 return;
             }
 
@@ -702,6 +744,9 @@ namespace cuDAO {
                         slotMap->erase(it);
                         delete syncData;
                         errorQueue->push(cuDAOStatus{cuDAOError::SlotPoolExhausted, __func__});
+                        if (task.promise) {
+                            task.promise->set();
+                        }
                         return;
                     }
                     it->second = slot;
@@ -771,6 +816,9 @@ namespace cuDAO {
             auto* completionData = new(std::nothrow) CompletionCallbackData;
             if (!completionData) {
                 errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
+                if (task.promise) {
+                    task.promise->set();
+                }
                 return;
             }
             completionData->readArgsCount = task.readArgsCount;
@@ -784,6 +832,9 @@ namespace cuDAO {
             if (!readData) {
                 errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
                 delete completionData;
+                if (task.promise) {
+                    task.promise->set();
+                }
                 return;
             }
 
@@ -798,6 +849,9 @@ namespace cuDAO {
                         delete readData;
                         delete completionData;
                         errorQueue->push(cuDAOStatus{cuDAOError::SlotPoolExhausted, __func__});
+                        if (task.promise) {
+                            task.promise->set();
+                        }
                         return;
                     }
                     it->second = slot;
@@ -851,6 +905,9 @@ namespace cuDAO {
             auto* completionData = new(std::nothrow) CompletionCallbackData;
             if (!completionData) {
                 errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
+                if (task.promise) {
+                    task.promise->set();
+                }
                 return;
             }
             completionData->readArgsCount = task.readArgsCount;
@@ -864,6 +921,9 @@ namespace cuDAO {
             if (!readData) {
                 errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
                 delete completionData;
+                if (task.promise) {
+                    task.promise->set();
+                }
                 return;
             }
 
@@ -878,6 +938,9 @@ namespace cuDAO {
                         delete readData;
                         delete completionData;
                         errorQueue->push(cuDAOStatus{cuDAOError::SlotPoolExhausted, __func__});
+                        if (task.promise) {
+                            task.promise->set();
+                        }
                         return;
                     }
                     it->second = slot;
@@ -895,6 +958,9 @@ namespace cuDAO {
                         delete readData;
                         delete completionData;
                         errorQueue->push(cuDAOStatus{cuDAOError::SlotPoolExhausted, __func__});
+                        if (task.promise) {
+                            task.promise->set();
+                        }
                         return;
                     }
                     it->second = slot;
@@ -973,6 +1039,9 @@ namespace cuDAO {
             };
             if (!syncData) {
                 errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
+                if (task.promise) {
+                    task.promise->set();
+                }
                 return;
             }
 
@@ -986,6 +1055,9 @@ namespace cuDAO {
                         slotMap->erase(it);
                         delete syncData;
                         errorQueue->push(cuDAOStatus{cuDAOError::SlotPoolExhausted, __func__});
+                        if (task.promise) {
+                            task.promise->set();
+                        }
                         return;
                     }
                     it->second = slot;
@@ -1054,6 +1126,9 @@ namespace cuDAO {
             auto* completionData = new(std::nothrow) CompletionCallbackData;
             if (!completionData) {
                 errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
+                if (task.promise) {
+                    task.promise->set();
+                }
                 return;
             }
             completionData->readArgsCount = task.readArgsCount;
@@ -1067,6 +1142,9 @@ namespace cuDAO {
             if (!readData) {
                 errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
                 delete completionData;
+                if (task.promise) {
+                    task.promise->set();
+                }
                 return;
             }
 
@@ -1081,6 +1159,9 @@ namespace cuDAO {
                         delete readData;
                         delete completionData;
                         errorQueue->push(cuDAOStatus{cuDAOError::SlotPoolExhausted, __func__});
+                        if (task.promise) {
+                            task.promise->set();
+                        }
                         return;
                     }
                     it->second = slot;
@@ -1136,9 +1217,15 @@ namespace cuDAO {
                 if (!slot) {
                     slotMap->erase(it);
                     errorQueue->push(cuDAOStatus{cuDAOError::SlotPoolExhausted, __func__});
+                    if (task.promise) {
+                        task.promise->set();
+                    }
                     return;
                 }
                 it->second = slot;
+            }
+            if (task.promise) {
+                task.promise->set();
             }
         }
 
@@ -1154,6 +1241,9 @@ namespace cuDAO {
             auto* syncData = new(std::nothrow) SyncCallbackData;
             if (!syncData) {
                 errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
+                if (task.promise) {
+                    task.promise->set();
+                }
                 return;
             }
 #endif
@@ -1223,6 +1313,9 @@ namespace cuDAO {
             };
             if (!unregisterData) {
                 errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
+                if (task.promise) {
+                    task.promise->set();
+                }
                 return;
             }
 
@@ -1275,6 +1368,9 @@ namespace cuDAO {
             };
             if (!syncData) {
                 errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
+                if (task.promise) {
+                    task.promise->set();
+                }
                 return;
             }
 #endif
@@ -1285,6 +1381,9 @@ namespace cuDAO {
                 };
                 if (!syncData) {
                     errorQueue->push(cuDAOStatus{cuDAOError::HostAllocationFailed, __func__});
+                    if (task.promise) {
+                        task.promise->set();
+                    }
                     return;
                 }
             }
@@ -1296,10 +1395,11 @@ namespace cuDAO {
                 auto* slot = slotPool.alloc();
                 if (!slot) {
                     slotMap->erase(it);
-                    if (syncData) {
-                        delete syncData;
-                    }
+                    delete syncData;
                     errorQueue->push(cuDAOStatus{cuDAOError::SlotPoolExhausted, __func__});
+                    if (task.promise) {
+                        task.promise->set();
+                    }
                     return;
                 }
                 it->second = slot;
