@@ -137,8 +137,16 @@ The installed `cuDAO::cuDAO` target exposes the installed single-header form.
 
 Build the Doxygen site locally with:
 
+On Linux/macOS:
+
 ```bash
 ./docs/generate_docs.sh
+```
+
+On Windows Powershell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\docs\generate_docs.ps1
 ```
 
 The generated entry point is:

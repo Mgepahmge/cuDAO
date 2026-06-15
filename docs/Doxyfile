@@ -18,9 +18,7 @@ ALLOW_UNICODE_NAMES    = NO
 OUTPUT_LANGUAGE        = English
 
 # Input
-INPUT                  = README.md \
-                         docs/mainpage.md \
-                         include
+INPUT                  = README.md docs include
 
 USE_MDFILE_AS_MAINPAGE = docs/mainpage.md
 

@@ -113,8 +113,16 @@ sudo apt-get install -y doxygen graphviz
 
 Then run:
 
+On Linux/macOS:
+
 ```bash
 ./docs/generate_docs.sh
+```
+
+On Windows Powershell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\docs\generate_docs.ps1
 ```
 
 The generated HTML entry point is:
