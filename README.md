@@ -80,6 +80,7 @@ Replace `89` with your GPU's compute capability (e.g. `70` for Volta, `80` for A
 |-------------------------------|---------|--------------------------------------------------------|
 | `CUDAO_BUILD_TESTS`           | ON      | Build test suite                                       |
 | `CUDAO_BUILD_EXAMPLES`        | ON      | Build examples                                         |
+| `CUDAO_BUILD_BENCHMARKS`      | ON      | Build benchmarks                                       |
 | `CUDAO_ENABLE_ASAN`           | OFF     | Enable AddressSanitizer (Debug builds only)            |
 | `CUDAO_USE_LEAST_TASK_POLICY` | OFF     | Use least-task stream scheduler instead of round-robin |
 

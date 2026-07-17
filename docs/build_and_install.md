@@ -78,6 +78,7 @@ The generated single header is used as the release/distribution form.
 |--------|---------|-------------|
 | `CUDAO_BUILD_TESTS` | `ON` when top-level project | Build test suite |
 | `CUDAO_BUILD_EXAMPLES` | `ON` when top-level project | Build examples |
+| `CUDAO_BUILD_BENCHMARKS` | `ON` when top-level project | Build benchmarks |
 | `CUDAO_ENABLE_ASAN` | `OFF` | Enable AddressSanitizer in Debug builds |
 | `CUDAO_USE_LEAST_TASK_POLICY` | `OFF` | Use least-task stream scheduling instead of round-robin |
 
@@ -94,6 +95,8 @@ Tests and examples intentionally use different include targets.
 
 Tests compile against the generated header to ensure the release artifact works. Examples compile against the source-tree aggregation header to improve IDE indexing of the modular headers during development.
 
+Benchmarks compile against the generated single header as well, so they measure the same distribution artifact that downstream users consume.
+
 To run tests:
 
 ```bash
@@ -104,6 +107,23 @@ cmake -S . -B build -G Ninja \
 
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
+```
+
+To build the benchmark executable:
+
+```bash
+cmake -S . -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CUDA_ARCHITECTURES=86 \
+  -DCUDAO_BUILD_BENCHMARKS=ON
+
+cmake --build build --parallel
+```
+
+The scheduler-overhead benchmark is built as:
+
+```text
+build/benchmark/benchmark_scheduler_overhead
 ```
 
 ---

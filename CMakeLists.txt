@@ -41,6 +41,7 @@ endif()
 
 option(CUDAO_BUILD_TESTS "Build tests" ${PROJECT_IS_TOP_LEVEL})
 option(CUDAO_BUILD_EXAMPLES "Build examples" ${PROJECT_IS_TOP_LEVEL})
+option(CUDAO_BUILD_BENCHMARKS "Build benchmarks" ${PROJECT_IS_TOP_LEVEL})
 option(CUDAO_ENABLE_ASAN "Enable AddressSanitizer (Debug only)" OFF)
 option(CUDAO_USE_LEAST_TASK_POLICY "Use least-task stream scheduler instead of round-robin" OFF)
 
@@ -170,6 +171,10 @@ endif()
 
 if(CUDAO_BUILD_EXAMPLES)
 add_subdirectory(examples)
+endif()
+
+if(CUDAO_BUILD_BENCHMARKS)
+add_subdirectory(benchmark)
 endif()
 
 # ── Installation ────────────────────────────────────────────────────────────
